@@ -176,7 +176,7 @@ export const startTunnel = (cfg: AgentConfig) => {
         send({ type: 'shell.exit', id, code });
         shells.delete(id);
       });
-    } catch (e) {
+    } catch {
       send({ type: 'shell.exit', id, code: 1 });
     }
   };
