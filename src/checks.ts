@@ -129,7 +129,8 @@ const runTcp = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcom
     socket.on('timeout', () => done(down('tcp connect timeout', Date.now() - start)));
     socket.on('error', (e) => done(down(e.message, Date.now() - start)));
     socket.on('end', () => {
-      if (match && !banner.includes(match)) done(down('banner match not found', Date.now() - start));
+      if (match && !banner.includes(match))
+        done(down('banner match not found', Date.now() - start));
     });
   });
 
@@ -193,8 +194,7 @@ const runProcess = async (cfg: Record<string, unknown>, timeoutMs: number): Prom
   const res = await sh(['pgrep', '-af', '--', name], timeoutMs);
   const latencyMs = Date.now() - start;
   const lines = res.stdout.trim().split('\n').filter(Boolean);
-  if (res.code !== 0 || lines.length === 0)
-    return down(`process '${name}' not running`, latencyMs);
+  if (res.code !== 0 || lines.length === 0) return down(`process '${name}' not running`, latencyMs);
   return ok(latencyMs, { count: lines.length });
 };
 
