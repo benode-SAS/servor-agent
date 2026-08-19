@@ -2,33 +2,72 @@ import { createHmac } from 'node:crypto';
 import type { AgentConfig } from './config';
 import { verifyExecGrant } from './protocol/exec-sign';
 
-// End-to-end exec policy, synced from the control plane config. When required,
-// every exec/shell.open must carry a grant signed by one of the authorized
-// vault-derived keys — verified LOCALLY, so a compromised control plane cannot
-// forge an execution.
-// Fail-closed: require a signed grant by default (until config says otherwise,
-// which it never does — signing is mandatory). With no keys yet, exec is refused.
-let execRequire = true;
+// End-to-end execution policy, synced from the control plane by fetchConfig.
+// Every exec and shell.open must carry a grant signed by one of the authorized
+// vault-derived operator keys, and that signature is verified HERE, on this
+// host. The control plane never holds the private half, so it relays a grant it
+// cannot forge; it decides what reaches the agent, not what the agent accepts.
+//
+// The initial value is deliberately the restrictive one: a command that arrives
+// before the first config sync finds signing required and no key to satisfy it,
+// so it is refused rather than run.
+// Not a variable, and not settable from the network. The control plane used to
+// send a `requireSignedExec` flag that this agent honoured; a response that
+// merely *omitted* it turned verification off entirely, which made the one
+// property the agent exists to provide remotely disableable — by silence.
+const EXEC_REQUIRE = true;
 let execKeys: Uint8Array[] = [];
+
+/** Nonces of accepted grants, mapped to when they were accepted. */
 const seenNonces = new Map<string, number>();
-// A grant is accepted from GRANT_PAST_SKEW_S in the past to GRANT_FUTURE_SKEW_S
-// ahead, so a signature can stay valid for the sum of the two. The nonce must
-// outlive that, or a grant becomes replayable again once its nonce is forgotten
-// while the signature is still good.
+
+/** How far in the past a grant's timestamp may sit and still be accepted. */
 const GRANT_PAST_SKEW_S = 300;
+/** How far ahead a grant's timestamp may sit — tolerance for clock drift, no more. */
 const GRANT_FUTURE_SKEW_S = 60;
+/**
+ * How long an accepted nonce is remembered.
+ *
+ * @remarks
+ * A grant is accepted anywhere in a window spanning both skews, so one
+ * signature can remain cryptographically valid for their sum. The nonce has to
+ * outlive that window, with margin — forget a nonce while its signature is
+ * still inside the acceptance window and the same captured grant becomes
+ * replayable. That is the entire reason this TTL exceeds the window rather than
+ * matching it.
+ */
 const NONCE_TTL_MS = (GRANT_PAST_SKEW_S + GRANT_FUTURE_SKEW_S + 60) * 1000;
 
 const fromB64 = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s, 'base64'));
 
-export const setExecPolicy = (require: boolean, keysB64: string[]) => {
-  execRequire = require;
+/**
+ * Install the execution policy received from the control plane.
+ *
+ * @param require - Whether a valid signature is demanded before anything runs.
+ * @param keysB64 - Base64 Ed25519 public keys allowed to sign grants; replaces
+ * the previous set, so revoking an operator is a matter of dropping their key
+ * from the next config response.
+ *
+ * @remarks
+ * Only public keys ever reach this agent. It can verify a grant and can do
+ * nothing else with these bytes — it cannot mint one, and neither can anything
+ * that reads them off this machine.
+ */
+export const setExecPolicy = (keysB64: string[]) => {
   execKeys = keysB64.map(fromB64);
 };
 
 const isRoot = () => typeof process.getuid === 'function' && process.getuid() === 0;
 
-// Wrap a command so it runs as the configured user (drop root via runuser).
+/**
+ * Build the argv for a one-shot command, dropping root when a user is configured.
+ *
+ * @remarks
+ * Wrapping is limited to choosing the interpreter and the account. Nothing is
+ * prepended to the command itself — no `cd`, no `sudo`, no exported variable —
+ * because the operator signed exactly this string and the signature must keep
+ * covering what actually executes.
+ */
 const wrapExec = (cfg: AgentConfig, command: string): string[] => {
   if (process.platform === 'win32') return ['powershell', '-NoProfile', '-Command', command];
   if (process.platform === 'linux' && cfg.user && isRoot()) {
@@ -37,7 +76,16 @@ const wrapExec = (cfg: AgentConfig, command: string): string[] => {
   return ['bash', '-lc', command];
 };
 
-// PTY-backed interactive shell via `script` (util-linux). Runs as configured user.
+/**
+ * Build the argv for an interactive session, backed by a PTY.
+ *
+ * @remarks
+ * `script` (util-linux) is used purely to obtain a pseudo-terminal without a
+ * native dependency: without one, programs that check for a TTY behave
+ * differently — no colours, no prompts, no line editing — and interactive tools
+ * refuse to run at all. The flags differ on macOS because its `script` takes
+ * the output file first.
+ */
 const wrapShell = (cfg: AgentConfig, command: string): string[] => {
   if (process.platform === 'win32') return ['powershell', '-NoProfile', '-Command', command];
   if (process.platform === 'darwin') return ['script', '-q', '/dev/null', 'bash', '-lc', command];
@@ -46,11 +94,17 @@ const wrapShell = (cfg: AgentConfig, command: string): string[] => {
   return base;
 };
 
+/** A live session: the process, its buffered output, and how it survives an outage. */
 type Shell = {
   proc: ReturnType<typeof Bun.spawn>;
-  offline: string[]; // output buffered while the tunnel is down (flushed on resume)
+  /** Output produced while the tunnel was down, replayed on resume. */
+  offline: string[];
   offlineBytes: number;
-  persistent: boolean; // form-launched command → never reaped by outage grace, runs to completion
+  /**
+   * Form-launched command: runs to completion and is never reaped by the outage
+   * grace timer, unlike an interactive terminal nobody is watching any more.
+   */
+  persistent: boolean;
 };
 
 // proc.stdin is typed as number | FileSink; with stdin:'pipe' it's a FileSink.
@@ -60,6 +114,21 @@ const writeStdin = (proc: ReturnType<typeof Bun.spawn>, data: string) => {
   sink.flush();
 };
 
+/**
+ * Open the outbound command channel and keep it alive for the agent's lifetime.
+ *
+ * @returns `{ isBusy }`, true while any session is open or a command is
+ * running; the updater uses it to defer a restart until the agent is idle.
+ *
+ * @remarks
+ * The connection is outbound only. The agent listens on no port and accepts no
+ * inbound connection, which is what lets it work behind NAT or a firewall — and
+ * means there is no listening surface to attack here. Reconnection backs off
+ * exponentially to a minute, so an API outage does not turn the fleet into a
+ * retry storm.
+ *
+ * Every message that can start a process passes {@link verifyGrant} first.
+ */
 export const startTunnel = (cfg: AgentConfig) => {
   const wsUrl = `${cfg.apiUrl.replace(/^http/, 'ws')}/agent/tunnel/${cfg.serverId}`;
   let ws: WebSocket | null = null;
@@ -75,8 +144,15 @@ export const startTunnel = (cfg: AgentConfig) => {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data));
   };
 
-  // Shell output: send live when connected, else buffer (bounded) so an API
-  // restart / blip doesn't lose output — flushed on resume.
+  /**
+   * Forward session output live, or buffer it while the tunnel is down.
+   *
+   * @remarks
+   * A command that keeps printing during an API restart would otherwise lose
+   * exactly the output someone was waiting for. The buffer is bounded and drops
+   * from the front, so a chatty process cannot grow the agent's memory without
+   * limit — the oldest output is sacrificed, never the newest.
+   */
   const sendShellData = (id: string, data: string) => {
     if (online) {
       send({ type: 'shell.data', id, data });
@@ -92,22 +168,64 @@ export const startTunnel = (cfg: AgentConfig) => {
     }
   };
 
-  // Verify a signed exec/shell grant against the authorized keys. serverId is the
-  // agent's own (anti-replay across servers); ts window + single-use nonce.
+  /**
+   * Decide whether a request to run something carries a valid operator grant.
+   *
+   * @param kind - `exec` or `shell`; part of the signed message, so a grant for
+   * a one-shot command cannot be re-used to open an interactive session.
+   * @param command - The exact command about to run, also signed. Verifying the
+   * string that executes, and not a description of it, is what stops the relay
+   * from substituting a different command behind a valid signature.
+   * @param msg - Raw tunnel message; `nonce`, `ts` and `sig` are read from it
+   * and everything else ignored.
+   * @returns `true` only when a signature over the whole grant verifies against
+   * one of the authorized keys. Every other outcome is `false`, and the caller
+   * refuses to run anything.
+   *
+   * @remarks
+   * This function is the trust boundary. Nothing upstream of it is trusted: the
+   * control plane relays a grant, it does not vouch for one.
+   *
+   * Four independent conditions must hold, and each closes a distinct attack.
+   *
+   * - **A key must exist.** With no authorized key, no signature can verify and
+   *   the answer is `false`. Verification fails closed on purpose: an agent that
+   *   ran commands while it had nothing to check them against would be at the
+   *   mercy of whoever spoke to it first.
+   * - **The grant is bound to this server.** `serverId` is the agent's own, taken
+   *   from local config and never from the message, so a grant captured on one
+   *   host cannot be replayed against another.
+   * - **The timestamp must fall inside the acceptance window.** The window is
+   *   asymmetric by design: several minutes of lateness are tolerated because
+   *   networks and queues are slow, but a grant minted far in the future is
+   *   refused — accepting one would stretch its validity past the lifetime of
+   *   the nonce that is supposed to make it single-use.
+   * - **The nonce must be unseen.** Signatures are replayable by anyone who
+   *   observes one; the nonce table is what makes a grant good exactly once.
+   *   It is only recorded on success, so a rejected grant cannot be used to
+   *   consume a nonce someone else would legitimately have presented.
+   *
+   * The table is pruned on every acceptance rather than past some size
+   * threshold: an earlier version pruned only after a thousand entries, which
+   * let expired nonces sit in memory while fresh ones were still being refused.
+   * The map stays small, so the sweep costs nothing.
+   *
+   * What this does not establish is who was at the keyboard. It proves a
+   * request was signed by a key the operator authorized — not that the person
+   * holding it meant to send this command, or that their browser was not
+   * compromised.
+   */
   const verifyGrant = (
     kind: 'exec' | 'shell',
     command: string,
     msg: Record<string, unknown>,
   ): boolean => {
-    if (!execRequire) return true;
+    if (!EXEC_REQUIRE) return true;
     const nonce = String(msg.nonce ?? '');
     const ts = String(msg.ts ?? '');
     const sig = String(msg.sig ?? '');
     if (!nonce || !ts || !sig || execKeys.length === 0) return false;
     const tsn = Number.parseInt(ts, 10);
-    // Asymmetric on purpose: a little clock drift ahead is tolerated, a grant
-    // minted far in the future is not — that was what stretched the validity
-    // window past the nonce's lifetime.
     const ageS = Math.floor(Date.now() / 1000) - tsn;
     if (!Number.isFinite(tsn) || ageS > GRANT_PAST_SKEW_S || ageS < -GRANT_FUTURE_SKEW_S) {
       return false;
@@ -123,15 +241,24 @@ export const startTunnel = (cfg: AgentConfig) => {
     const ok = execKeys.some((k) => verifyExecGrant(k, grant, sigBytes));
     if (ok) {
       seenNonces.set(nonce, Date.now());
-      // Purge on every accepted grant rather than only past a thousand entries:
-      // the old threshold let expired nonces linger while fresh ones were still
-      // being refused, and the map is small enough that this costs nothing.
       const cutoff = Date.now() - NONCE_TTL_MS;
       for (const [n, ti] of seenNonces) if (ti < cutoff) seenNonces.delete(n);
     }
     return ok;
   };
 
+  /**
+   * Run one already-authorized command and report its outcome.
+   *
+   * @param timeoutMs - Requested deadline; clamped to ten minutes, and defaulted
+   * to five when zero, so no request can leave a process running forever.
+   *
+   * @remarks
+   * Called only after the grant verified. Both streams are captured whole and
+   * sent back with the exit code, so failures reach the operator instead of
+   * vanishing; a spawn that throws is reported as exit 1 with the error message
+   * rather than leaving the request unanswered.
+   */
   const runExec = async (id: string, command: string, timeoutMs: number) => {
     const start = Date.now();
     inflightExec++;
@@ -159,6 +286,18 @@ export const startTunnel = (cfg: AgentConfig) => {
     }
   };
 
+  /**
+   * Start an already-authorized interactive session and stream its output.
+   *
+   * @param persistent - Keep the process alive through a long tunnel outage
+   * (a form-launched command that must finish) instead of reaping it.
+   *
+   * @remarks
+   * The grant covers opening this session, not the keystrokes that follow —
+   * an inherent property of an interactive terminal, and stated as such in the
+   * README. `TERM`, `COLUMNS` and `LINES` are set so the remote terminal renders
+   * at the size the operator actually sees.
+   */
   const openShell = (
     id: string,
     command: string,
@@ -194,6 +333,19 @@ export const startTunnel = (cfg: AgentConfig) => {
     }
   };
 
+  /**
+   * Dispatch one tunnel message.
+   *
+   * @remarks
+   * The two cases that can start a process — `exec` and `shell.open` — verify a
+   * grant first and answer with a refusal (exit code 126, "command not
+   * executable") when it does not hold. Unknown message types are ignored
+   * rather than treated as anything.
+   *
+   * The remaining cases act on an already-open session identified by `id`, and
+   * carry no grant of their own: writing to a session's stdin is a continuation
+   * of the session that was authorized at open.
+   */
   const handle = (msg: Record<string, unknown>) => {
     const id = String(msg.id ?? '');
     switch (msg.type) {
@@ -257,6 +409,14 @@ export const startTunnel = (cfg: AgentConfig) => {
     }
   };
 
+  /**
+   * Dial the control plane and wire up the socket, reconnecting on close.
+   *
+   * @remarks
+   * The first message is an HMAC over `tunnel:<serverId>` with the enrollment
+   * secret, proving to the control plane which agent this is. It says nothing
+   * about what may be executed — that is settled per command, by signature.
+   */
   const connect = () => {
     ws = new WebSocket(wsUrl);
     ws.onopen = () => {
@@ -333,7 +493,5 @@ export const startTunnel = (cfg: AgentConfig) => {
 
   connect();
 
-  // Exposed so the updater can drain: true while any interactive shell is open
-  // or a one-shot exec is running. Used to defer a staged self-update until idle.
   return { isBusy: () => shells.size > 0 || inflightExec > 0 };
 };

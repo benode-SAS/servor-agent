@@ -3,6 +3,15 @@ import { chmodSync, renameSync, writeFileSync } from 'node:fs';
 import type { AgentConfig } from './config';
 import { UPDATE_PUBKEY } from './pubkey';
 
+/**
+ * Identify which of the published builds fits this machine, e.g. `linux-x64`.
+ *
+ * @remarks
+ * Anything that is not Windows or macOS is treated as Linux, and any
+ * architecture that is not arm64 as x64. The key selects both the download and
+ * the checksum it is checked against, so a wrong guess cannot install a foreign
+ * binary — it fails verification and no update happens.
+ */
 export const platformKey = (): string => {
   const os =
     process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux';
@@ -10,15 +19,49 @@ export const platformKey = (): string => {
   return `${os}-${arch}`;
 };
 
+/** What the control plane advertises: a version and, per platform, its digest and signature. */
 type VersionInfo = {
   version: string;
   builds?: Record<string, { sha256?: string; signature?: string }>;
 };
 
-// Download + verify the new binary and swap it on disk, WITHOUT restarting.
-// Returns true once a verified newer build is staged. The caller restarts only
-// when the agent is idle (graceful drain) — see index.ts. Swapping the file is
-// safe while running: the live process keeps the old code in memory until exit.
+/**
+ * Download the advertised build, verify it, and swap it on disk without restarting.
+ *
+ * @param buildVersion - Version currently running; an identical advertised
+ * version means there is nothing to do.
+ * @returns `true` once a verified newer binary is in place and only a restart
+ * is missing. `false` covers everything else — no new version, a failed
+ * download, and every verification failure. There is no third outcome where an
+ * unverified binary is installed and a warning printed.
+ *
+ * @remarks
+ * Self-update is the most dangerous thing this program does: it replaces the
+ * code that runs on the host, often as root. So the binary has to clear two
+ * independent bars, and neither is optional.
+ *
+ * **Integrity.** The SHA-256 of the downloaded bytes must equal the digest the
+ * manifest advertises for this platform. No advertised digest means the server
+ * has no verified build to offer, and the update is abandoned rather than
+ * treated as a bare download.
+ *
+ * **Authenticity.** That digest must carry an Ed25519 signature from the key
+ * embedded in this binary at build time. The checksum alone settles nothing
+ * about origin: it travels from the same host as the binary, so anyone able to
+ * serve a modified binary can serve a matching checksum with it. Only a
+ * signature made with a key that never sits on that host distinguishes a build
+ * the maintainers produced from one the API — or whoever took it over — is
+ * merely hosting.
+ *
+ * With no embedded public key the agent refuses to update at all. Warning and
+ * installing anyway would leave a build with no verifiable origin running on
+ * every machine in the fleet; staying on a known older version is the safer of
+ * the two failures, and it is loud enough in the logs to be noticed.
+ *
+ * Swapping the file while running is safe: the live process keeps its code in
+ * memory, so the new binary only takes effect at the next start. The restart is
+ * left to the caller, which waits for the agent to be idle — see index.ts.
+ */
 export const stageUpdate = async (cfg: AgentConfig, buildVersion: string): Promise<boolean> => {
   try {
     const res = await fetch(`${cfg.apiUrl}/agent/version`);
@@ -32,8 +75,7 @@ export const stageUpdate = async (cfg: AgentConfig, buildVersion: string): Promi
     const buf = Buffer.from(await dl.arrayBuffer());
     const got = createHash('sha256').update(buf).digest('hex');
 
-    // 1) Integrity: checksum is MANDATORY. No advertised checksum for this
-    // platform → the server has no verified build, so never swap.
+    // 1) Integrity — mandatory, no digest means no verified build to install.
     const expected = info.builds?.[plat]?.sha256;
     if (!expected) {
       console.error('update aborted: no verified build for platform');
@@ -44,8 +86,8 @@ export const stageUpdate = async (cfg: AgentConfig, buildVersion: string): Promi
       return false;
     }
 
-    // 2) Authenticity: ed25519 signature over the sha256 (defends against a
-    // compromised control plane / CDN). Mandatory when a public key is embedded.
+    // 2) Authenticity — ed25519 over the digest, verified against the key
+    // compiled into this binary, not one fetched alongside the download.
     if (UPDATE_PUBKEY) {
       const sig = info.builds?.[plat]?.signature;
       if (!sig) {
@@ -67,11 +109,9 @@ export const stageUpdate = async (cfg: AgentConfig, buildVersion: string): Promi
         return false;
       }
     } else {
-      // Fail closed. A checksum served by the same origin as the binary proves
-      // the download was not corrupted in transit; it proves nothing about who
-      // produced it. Installing anyway would let whoever controls the API — or
-      // its host — push arbitrary code to every machine in the fleet, usually
-      // as root. Refusing to self-update is the safe failure here.
+      // No key was compiled in, so authenticity cannot be established at all:
+      // refuse rather than fall back to the checksum, which proves only that
+      // the download matches what the same host advertised.
       console.error(
         'update aborted: no embedded public key, signature cannot be verified. ' +
           'Build the agent with UPDATE_PUBKEY set (see scripts/gen-update-key.ts).',
@@ -79,6 +119,8 @@ export const stageUpdate = async (cfg: AgentConfig, buildVersion: string): Promi
       return false;
     }
 
+    // Write beside the target and rename over it: a crash mid-write leaves the
+    // old working binary in place, never a truncated one.
     const target = process.execPath;
     const tmp = `${target}.new`;
     writeFileSync(tmp, buf);

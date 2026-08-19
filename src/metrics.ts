@@ -1,6 +1,20 @@
 import { readFileSync } from 'node:fs';
 
+/**
+ * One metrics sample as sent to the control plane.
+ *
+ * @remarks
+ * Read-only host telemetry: nothing here is derived from a command the control
+ * plane sent. `specs` holds what rarely changes (distro, kernel, CPU model,
+ * total RAM), `metrics` what is sampled each round. Both are loose maps because
+ * the set of keys differs per platform and the server validates them; a missing
+ * key means "not collectable here", never zero.
+ *
+ * `os` only admits the two families the wire format knows. macOS reports
+ * `linux` here and carries its real identity in `specs.osFamily`.
+ */
 export type Payload = {
+  /** Payload format version, bumped when the shape changes. */
   v: 1;
   agentVersion: string;
   os: 'linux' | 'windows';
@@ -10,6 +24,7 @@ export type Payload = {
   metrics: Record<string, unknown>;
 };
 
+/** Run a command and return its trimmed stdout, or `''` if it fails at all. */
 const sh = (cmd: string[]): string => {
   try {
     const p = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'ignore' });
@@ -18,6 +33,7 @@ const sh = (cmd: string[]): string => {
     return '';
   }
 };
+/** Read a file (typically under /proc), returning `''` rather than throwing. */
 const readProc = (p: string): string => {
   try {
     return readFileSync(p, 'utf8');
@@ -26,13 +42,25 @@ const readProc = (p: string): string => {
   }
 };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** Parse a float, mapping anything unparseable to `undefined` so it is omitted. */
 const num = (s: string | undefined) => {
   const n = Number.parseFloat(s ?? '');
   return Number.isFinite(n) ? n : undefined;
 };
 
-// ── Linux ───────────────────────────────────────────────────────────────────
+/** Cumulative jiffies since boot, for one CPU line of /proc/stat. */
 type CpuSnap = { busy: number; total: number };
+
+/**
+ * Turn /proc/stat into cumulative busy/total counters, keyed `cpu`, `cpu0`, …
+ *
+ * @remarks
+ * The kernel exposes counters, not a rate, so a percentage only exists between
+ * two snapshots (see {@link collectLinux}). Idle is `idle + iowait`; busy is
+ * user, nice, system, irq, softirq and steal. The trailing guest counters are
+ * left out because the kernel already counts them inside user time — adding
+ * them would inflate busy above total.
+ */
 const parseCpuLines = (raw: string): Map<string, CpuSnap> => {
   const map = new Map<string, CpuSnap>();
   for (const line of raw.split('\n')) {
@@ -47,6 +75,16 @@ const parseCpuLines = (raw: string): Map<string, CpuSnap> => {
   return map;
 };
 
+/**
+ * Sample a Linux host, mostly from /proc plus a few coreutils.
+ *
+ * @remarks
+ * Blocks for one second between the two /proc/stat reads: CPU usage is a
+ * difference between counters, so there is no instantaneous value to read. The
+ * loopback interface is excluded from network totals, and pseudo-filesystems
+ * (tmpfs, devtmpfs, overlay, squashfs) from disk totals, so the numbers
+ * describe real hardware rather than the kernel's bookkeeping.
+ */
 const collectLinux = async (version: string): Promise<Payload> => {
   const s1 = parseCpuLines(readProc('/proc/stat'));
   await sleep(1000);
@@ -168,7 +206,15 @@ const collectLinux = async (version: string): Promise<Payload> => {
   };
 };
 
-// ── macOS (best-effort) ───────────────────────────────────────────────────────
+/**
+ * Sample a macOS host, best-effort.
+ *
+ * @remarks
+ * macOS is a development convenience, not a supported production target: there
+ * is no per-core breakdown, no memory or network detail and no uptime, because
+ * getting them reliably would mean shelling out to far more tooling than this
+ * is worth. CPU usage comes from a single `top` sample rather than a delta.
+ */
 const collectDarwin = (version: string): Payload => {
   const cores = Number.parseInt(sh(['sysctl', '-n', 'hw.ncpu']), 10) || undefined;
   const memTotalB = Number.parseInt(sh(['sysctl', '-n', 'hw.memsize']), 10) || 0;
@@ -229,7 +275,16 @@ const collectDarwin = (version: string): Payload => {
   };
 };
 
-// ── Windows (best-effort, PowerShell) ────────────────────────────────────────
+/**
+ * PowerShell script that collects the whole Windows payload in one process.
+ *
+ * @remarks
+ * A single script rather than one spawn per metric: process creation is
+ * expensive on Windows and CIM queries are slow enough that a dozen of them
+ * would dominate the sampling interval. `__V__` is substituted with the agent
+ * version before execution; it is the only interpolation, and its value is a
+ * compile-time constant, never anything received over the network.
+ */
 const PS_SCRIPT = `
 $o=Get-CimInstance Win32_OperatingSystem
 $cpu=(Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
@@ -243,6 +298,12 @@ $cpus=@(); try { Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Wher
 } | ConvertTo-Json -Depth 6 -Compress
 `;
 
+/**
+ * Sample a Windows host by running {@link PS_SCRIPT} and parsing its JSON.
+ *
+ * @returns An empty-but-valid payload if PowerShell fails or prints something
+ * unparseable, so a broken sample skips a round instead of stopping the loop.
+ */
 const collectWindows = (version: string): Payload => {
   const out = sh(['powershell', '-NoProfile', '-Command', PS_SCRIPT.replace('__V__', version)]);
   try {
@@ -252,6 +313,16 @@ const collectWindows = (version: string): Payload => {
   }
 };
 
+/**
+ * Collect one host sample using the collector for the current platform.
+ *
+ * @param version - Agent build version, stamped into the payload so the control
+ * plane knows which code produced these numbers.
+ * @remarks
+ * Takes roughly a second on Linux, where CPU usage is measured across two
+ * snapshots. Everything read here is local host state; the control plane cannot
+ * influence what is collected.
+ */
 export const collect = async (version: string): Promise<Payload> => {
   if (process.platform === 'win32') return collectWindows(version);
   if (process.platform === 'darwin') return collectDarwin(version);
