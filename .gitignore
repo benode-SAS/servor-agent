@@ -1,0 +1,7 @@
+node_modules/
+dist/
+
+# Never committed: the private half of the auto-update signing key.
+*.agent-update-key.private
+.env
+.env.local
