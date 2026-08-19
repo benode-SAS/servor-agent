@@ -11,7 +11,13 @@ import type { AgentConfig } from './config';
 let execRequire = true;
 let execKeys: Uint8Array[] = [];
 const seenNonces = new Map<string, number>();
-const NONCE_TTL_MS = 6 * 60 * 1000;
+// A grant is accepted from GRANT_PAST_SKEW_S in the past to GRANT_FUTURE_SKEW_S
+// ahead, so a signature can stay valid for the sum of the two. The nonce must
+// outlive that, or a grant becomes replayable again once its nonce is forgotten
+// while the signature is still good.
+const GRANT_PAST_SKEW_S = 300;
+const GRANT_FUTURE_SKEW_S = 60;
+const NONCE_TTL_MS = (GRANT_PAST_SKEW_S + GRANT_FUTURE_SKEW_S + 60) * 1000;
 
 const fromB64 = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s, 'base64'));
 
@@ -99,7 +105,13 @@ export const startTunnel = (cfg: AgentConfig) => {
     const sig = String(msg.sig ?? '');
     if (!nonce || !ts || !sig || execKeys.length === 0) return false;
     const tsn = Number.parseInt(ts, 10);
-    if (!Number.isFinite(tsn) || Math.abs(Math.floor(Date.now() / 1000) - tsn) > 300) return false;
+    // Asymmetric on purpose: a little clock drift ahead is tolerated, a grant
+    // minted far in the future is not — that was what stretched the validity
+    // window past the nonce's lifetime.
+    const ageS = Math.floor(Date.now() / 1000) - tsn;
+    if (!Number.isFinite(tsn) || ageS > GRANT_PAST_SKEW_S || ageS < -GRANT_FUTURE_SKEW_S) {
+      return false;
+    }
     if (seenNonces.has(nonce)) return false;
     let sigBytes: Uint8Array;
     try {
@@ -111,10 +123,11 @@ export const startTunnel = (cfg: AgentConfig) => {
     const ok = execKeys.some((k) => verifyExecGrant(k, grant, sigBytes));
     if (ok) {
       seenNonces.set(nonce, Date.now());
-      if (seenNonces.size > 1000) {
-        const cutoff = Date.now() - NONCE_TTL_MS;
-        for (const [n, ti] of seenNonces) if (ti < cutoff) seenNonces.delete(n);
-      }
+      // Purge on every accepted grant rather than only past a thousand entries:
+      // the old threshold let expired nonces linger while fresh ones were still
+      // being refused, and the map is small enough that this costs nothing.
+      const cutoff = Date.now() - NONCE_TTL_MS;
+      for (const [n, ti] of seenNonces) if (ti < cutoff) seenNonces.delete(n);
     }
     return ok;
   };
