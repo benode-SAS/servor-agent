@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "types": ["bun"],
+    "lib": ["ES2023"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"],
+      "@servor/shared": ["../../packages/shared/src/index.ts"],
+      "@servor/shared/*": ["../../packages/shared/src/*"]
+    }
+  },
+  "include": ["src/**/*", "scripts/**/*"]
+}
