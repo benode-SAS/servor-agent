@@ -3,7 +3,7 @@ import { readFileSync, renameSync, writeFileSync } from 'node:fs';
 export type AgentConfig = {
   serverId: string;
   secret: string;
-  apiUrl: string; // https base, e.g. https://api.servor.app
+  apiUrl: string; // https base, e.g. https://api.servor.benode.fr
   intervalSeconds: number;
   mode: 'push' | 'tunnel';
   user?: string; // OS user to run tunnel commands as (the configured SSH user)
