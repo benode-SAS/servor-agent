@@ -1,5 +1,6 @@
 import { createConnection } from 'node:net';
 import { connect, type PeerCertificate } from 'node:tls';
+import { validateCommand } from '@servor/shared/utils';
 
 // Checks run locally on the server, against localhost only. No remote host is
 // ever contacted — the control plane never sends a command to run them.
@@ -203,6 +204,11 @@ const runShellCommand = async (
   timeoutMs: number,
   user: string | undefined,
 ): Promise<Outcome> => {
+  // The blocklist is applied here too, not only on the control plane. A check
+  // definition arrives over the config channel and is not covered by an exec
+  // grant, so this is the only guard left if that channel is ever wrong.
+  const guard = validateCommand(command);
+  if (!guard.ok) return down(`command rejected: ${guard.reason}`, 0);
   const start = Date.now();
   const res = await sh(wrapAsUser(user, command), timeoutMs);
   const latencyMs = Date.now() - start;
