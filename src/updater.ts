@@ -67,7 +67,16 @@ export const stageUpdate = async (cfg: AgentConfig, buildVersion: string): Promi
         return false;
       }
     } else {
-      console.warn('update: no embedded public key — signature NOT verified (dev only)');
+      // Fail closed. A checksum served by the same origin as the binary proves
+      // the download was not corrupted in transit; it proves nothing about who
+      // produced it. Installing anyway would let whoever controls the API — or
+      // its host — push arbitrary code to every machine in the fleet, usually
+      // as root. Refusing to self-update is the safe failure here.
+      console.error(
+        'update aborted: no embedded public key, signature cannot be verified. ' +
+          'Build the agent with UPDATE_PUBKEY set (see scripts/gen-update-key.ts).',
+      );
+      return false;
     }
 
     const target = process.execPath;
