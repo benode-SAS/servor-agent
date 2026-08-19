@@ -98,6 +98,24 @@ Two things worth knowing up front:
   [`src/protocol/command-guards.ts`](src/protocol/command-guards.ts), which
   refuses destructive and lockout commands.
 
+### The tunnel is transport, not trust
+
+The connection is a plain `wss://` with the standard certificate validation your
+runtime does — no pinning, no mTLS, nothing exotic. The handshake is an HMAC
+proving which agent is speaking; it authorises nothing.
+
+That is deliberate, and it is the part worth checking if you are deciding
+whether to run this. Authority lives in the per-command signature, verified on
+your machine against a key that never left the operator's browser. Break the
+TLS, take over the control plane, sit in the middle — you get the ability to
+*relay*, not to *forge*. There is no command you can inject that the agent will
+accept.
+
+What that does not cover: without pinning, a compromised CA or a corporate proxy
+terminating TLS can read the stream, and since a shell session is signed only at
+open, whoever holds the pipe can read that session. Replay is bounded by the
+nonce and timestamp checks, not by the transport.
+
 ## Updates
 
 The agent replaces itself when Servor advertises a newer build, if the download
