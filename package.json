@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "bun run src/index.ts",
     "typecheck": "tsc --noEmit",
+    "protocol:check": "bun run scripts/check-vendored.ts",
     "build:linux-x64": "bun build src/index.ts --compile --target=bun-linux-x64 --outfile dist/servor-agent-linux-x64",
     "build:linux-arm64": "bun build src/index.ts --compile --target=bun-linux-arm64 --outfile dist/servor-agent-linux-arm64",
     "build:linux-x64-musl": "bun build src/index.ts --compile --target=bun-linux-x64-musl --outfile dist/servor-agent-linux-x64-musl",
@@ -18,6 +19,14 @@
     "build": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:linux-x64-musl && bun run build:linux-arm64-musl && bun run build:darwin-x64 && bun run build:darwin-arm64 && bun run build:windows-x64 && bun run build:manifest"
   },
   "devDependencies": {
+    "@types/shell-quote": "^1.7.5",
     "typescript": "^6.0.3"
-  }
+  },
+  "dependencies": {
+    "@noble/curves": "^1.7.0",
+    "@noble/hashes": "^1.6.0",
+    "shell-quote": "^1.8.2"
+  },
+  "license": "Apache-2.0",
+  "description": "Servor agent \u2014 outbound-only supervision and signed command execution."
 }

@@ -1,0 +1,18 @@
+{
+  "exec-sign.ts": {
+    "source": "packages/shared/src/crypto/exec-sign.ts",
+    "sha256": "23bcbc04d12a3f2356ca79ee4baa4a84ffe0277fb31a9a94a913cd3ea3f7135e"
+  },
+  "wipe.ts": {
+    "source": "packages/shared/src/crypto/wipe.ts",
+    "sha256": "5c648a6e742146509697db5d007691d4f24f059471e64dcde8d0bdf4856620bf"
+  },
+  "command-guards.ts": {
+    "source": "packages/shared/src/utils/command-guards.ts",
+    "sha256": "efd52722c078b34d094871c9592f48c538a91bce87dd9c1ecb639ac7e8259b34"
+  },
+  "command-blacklist.ts": {
+    "source": "packages/shared/src/constants/command-blacklist.ts",
+    "sha256": "e2c1fb703601b66d2455e79511d63907412cb8489dae351409c640a61cbc1df4"
+  }
+}
