@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
-import { verifyExecGrant } from '@servor/shared/crypto';
 import type { AgentConfig } from './config';
+import { verifyExecGrant } from './protocol/exec-sign';
 
 // End-to-end exec policy, synced from the control plane config. When required,
 // every exec/shell.open must carry a grant signed by one of the authorized

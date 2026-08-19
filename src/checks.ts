@@ -1,6 +1,6 @@
 import { createConnection } from 'node:net';
 import { connect, type PeerCertificate } from 'node:tls';
-import { validateCommand } from '@servor/shared/utils';
+import { validateCommand } from './protocol/command-guards';
 
 // Checks run locally on the server, against localhost only. No remote host is
 // ever contacted — the control plane never sends a command to run them.
