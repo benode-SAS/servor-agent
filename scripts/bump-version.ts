@@ -1,11 +1,22 @@
-// Bump the agent's build version. Called by CI on any change under apps/agent.
-//
-//   bun run scripts/bump-version.ts [patch|minor|major]
-//
-// The version lives in src/version.ts because the compiled binary has to carry
-// it — there is no package.json inside the executable. write-manifest.ts copies
-// it into dist/manifest.json after the binaries exist, so the API can never
-// advertise a version nobody built.
+/**
+ * Bump `BUILD_VERSION` in src/version.ts. Run by CI on any change under apps/agent.
+ *
+ * ```sh
+ * bun run scripts/bump-version.ts [patch|minor|major]
+ * ```
+ *
+ * @remarks
+ * The version lives in source because the compiled binary has to carry it —
+ * there is no package.json inside an executable. Rewriting the file is the
+ * whole job; write-manifest.ts is what later tells the API this version exists,
+ * and only after the binaries have actually been built.
+ *
+ * Exits non-zero on an unknown bump kind or if the constant cannot be found, so
+ * a broken release pipeline stops here rather than shipping an unchanged
+ * version under a new tag.
+ *
+ * @module
+ */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -34,7 +45,7 @@ const next =
 
 writeFileSync(file, source.replace(match[0], `export const BUILD_VERSION = '${next}';`));
 
-// Consumed by the workflow to name the tag and the release.
+// Consumed by the release workflow to name the tag and the release.
 const out = process.env.GITHUB_OUTPUT;
 if (out) writeFileSync(out, `version=${next}\n`, { flag: 'a' });
 

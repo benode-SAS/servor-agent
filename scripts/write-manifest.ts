@@ -1,10 +1,18 @@
+/**
+ * Write dist/manifest.json, the version the API advertises to the fleet.
+ *
+ * @remarks
+ * Deliberately the last step of the build, after the binaries exist. The
+ * manifest is what tells agents a newer version is available, so writing it
+ * from the source constant at any earlier point would let a bumped-but-unbuilt
+ * version send every agent chasing a download that is not there.
+ *
+ * @module
+ */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { BUILD_VERSION } from '../src/version';
 
-// Written after the binaries are compiled so the API advertises ONLY the version
-// that was actually built. Bumping the version constant without rebuilding does
-// not change this manifest → agents never chase a non-existent binary.
 const out = join(import.meta.dir, '..', 'dist', 'manifest.json');
 mkdirSync(dirname(out), { recursive: true });
 writeFileSync(out, JSON.stringify({ version: BUILD_VERSION, builtAt: new Date().toISOString() }));

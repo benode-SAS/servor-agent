@@ -2,27 +2,45 @@ import { createConnection } from 'node:net';
 import { connect, type PeerCertificate } from 'node:tls';
 import { validateCommand } from './protocol/command-guards';
 
-// Checks run locally on the server, against localhost only. No remote host is
-// ever contacted — the control plane never sends a command to run them.
+// Checks run from this host, on the schedule the control plane sends. The tcp
+// and ssl probes are pinned to 127.0.0.1; an http check dials whatever URL its
+// definition names, which is the point of it — reaching a service the outside
+// world cannot.
+//
+// Check definitions arrive over the config channel and carry no execution
+// grant, so the ones that run a command (custom_script, ssh) go through the
+// local blocklist in runShellCommand. See the README's limitations section.
 
+/** Probe kinds a check definition can ask for. */
 export type CheckType = 'http' | 'tcp' | 'ssl' | 'ssh' | 'disk' | 'process' | 'custom_script';
 
+/** A scheduled probe as configured by the control plane. */
 export type CheckDef = {
+  /** Monitor this check reports as; also the key of its schedule. */
   id: string;
   type: CheckType;
+  /** Minimum delay between two runs of this check. */
   intervalSeconds: number;
+  /** Per-run deadline; exceeding it is a `down`, never a hang. */
   timeoutSeconds: number;
+  /** Type-specific settings (url, port, mountPoint, command…), validated per probe. */
   config: Record<string, unknown>;
 };
 
+/** Outcome of one check run, as pushed back to the control plane. */
 export type CheckResult = {
   monitorId: string;
+  /** `degraded` means the probe succeeded but crossed a warning threshold. */
   status: 'up' | 'down' | 'degraded';
+  /** Measured duration, or `null` when the probe failed before it could time anything. */
   latencyMs: number | null;
+  /** Human-readable failure cause; `null` when `up`. */
   errorMessage: string | null;
+  /** Probe-specific detail (HTTP status, certificate expiry, disk percentage…). */
   metadata?: Record<string, unknown>;
 };
 
+/** A {@link CheckResult} before it is attributed to a monitor. */
 type Outcome = Omit<CheckResult, 'monitorId'>;
 
 const DEGRADED_LATENCY_MS = 3_000;
@@ -47,7 +65,16 @@ const degraded = (
 
 const isRoot = () => typeof process.getuid === 'function' && process.getuid() === 0;
 
-// Arbitrary commands (custom_script / ssh) run as the configured SSH user.
+/**
+ * Build the argv that runs `command` as the configured user rather than root.
+ *
+ * @remarks
+ * Only meaningful when the agent itself runs as root: `runuser` drops to the
+ * enrolled account so a check command has that account's rights, not root's. If
+ * no user is configured, or the agent is not root, the command runs as whatever
+ * the agent is — the README says this plainly: it runs as the user you
+ * configure, and if you configure root, it is root.
+ */
 const wrapAsUser = (user: string | undefined, command: string): string[] => {
   if (process.platform === 'win32') return ['powershell', '-NoProfile', '-Command', command];
   if (process.platform === 'linux' && user && isRoot()) {
@@ -56,6 +83,13 @@ const wrapAsUser = (user: string | undefined, command: string): string[] => {
   return ['bash', '-lc', command];
 };
 
+/**
+ * Spawn a command, capture both streams, and kill it once the deadline passes.
+ *
+ * @returns The exit code and captured output. A killed process reports the
+ * signal's exit code, so a timeout surfaces as a non-zero result rather than a
+ * thrown error.
+ */
 const sh = async (
   argv: string[],
   timeoutMs: number,
@@ -71,6 +105,13 @@ const sh = async (
   return { code, stdout, stderr };
 };
 
+/**
+ * Request a URL and grade the response against the expected status and body.
+ *
+ * @returns `down` on an unexpected status, a missing body match or a transport
+ * error; `degraded` when the response arrived but took longer than
+ * {@link DEGRADED_LATENCY_MS}.
+ */
 const runHttp = async (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcome> => {
   const url = String(cfg.url ?? '');
   const expected = Array.isArray(cfg.expectedStatus)
@@ -106,6 +147,17 @@ const runHttp = async (cfg: Record<string, unknown>, timeoutMs: number): Promise
   }
 };
 
+/**
+ * Open a TCP connection to a local port, optionally waiting for a banner.
+ *
+ * @remarks
+ * Pinned to 127.0.0.1: this exists to prove a service is listening on this
+ * machine, and refusing to dial elsewhere keeps the check from being usable as
+ * a port scanner driven from the control plane.
+ *
+ * @returns `up` as soon as the connection is established when no banner is
+ * expected; otherwise once the banner contains the expected substring.
+ */
 const runTcp = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcome> =>
   new Promise((resolve) => {
     const port = Number(cfg.port);
@@ -135,6 +187,18 @@ const runTcp = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcom
     });
   });
 
+/**
+ * Handshake with a local TLS port and report how long the certificate has left.
+ *
+ * @remarks
+ * `rejectUnauthorized` is off on purpose: the goal is to read the certificate's
+ * expiry, and connecting to 127.0.0.1 by a name the certificate was not issued
+ * for would otherwise fail the handshake before it could be read. Nothing is
+ * sent over this connection, so accepting an untrusted peer exposes nothing.
+ *
+ * @returns `down` past expiry, `degraded` inside the warning window, `up`
+ * otherwise; the remaining days travel in the metadata either way.
+ */
 const runSsl = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcome> =>
   new Promise((resolve) => {
     const port = Number(cfg.port ?? 443);
@@ -172,6 +236,13 @@ const runSsl = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcom
     socket.on('error', (e) => done(down(e.message, Date.now() - start)));
   });
 
+/**
+ * Read `df` for one mount point and grade its usage against two thresholds.
+ *
+ * @returns `down` at or above the critical percentage, `degraded` at or above
+ * the warning one. A mount point `df` does not know is `down` with a distinct
+ * message, since a monitor pointed at a vanished filesystem is itself a fault.
+ */
 const runDisk = async (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcome> => {
   const mount = String(cfg.mountPoint ?? '/');
   const warn = Number(cfg.warnPercent ?? 80);
@@ -189,6 +260,15 @@ const runDisk = async (cfg: Record<string, unknown>, timeoutMs: number): Promise
   return ok(latencyMs, meta);
 };
 
+/**
+ * Report whether at least one process matches a name, via `pgrep -af`.
+ *
+ * @remarks
+ * The name is passed after `--` so a value starting with a dash is treated as a
+ * pattern and not as a pgrep option.
+ *
+ * @returns `up` with the number of matches, or `down` when none match.
+ */
 const runProcess = async (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcome> => {
   const name = String(cfg.processName ?? '');
   const start = Date.now();
@@ -199,14 +279,28 @@ const runProcess = async (cfg: Record<string, unknown>, timeoutMs: number): Prom
   return ok(latencyMs, { count: lines.length });
 };
 
+/**
+ * Run a check's own shell command and grade it by exit code.
+ *
+ * @returns `up` when the command exits 0, carrying the first 200 characters of
+ * stdout as evidence; `down` otherwise, or immediately if the blocklist refuses
+ * the command.
+ *
+ * @remarks
+ * The blocklist is applied here, not only on the control plane. A check
+ * definition arrives over the config channel and carries no execution grant, so
+ * this call is the last guard between a wrong or malicious config response and
+ * a command running on the host. Removing it would turn the config channel —
+ * which is authenticated by the shared HMAC secret, not by an operator's
+ * signature — into an unsigned execution path. It refuses destructive and
+ * lockout commands; it is not a sandbox, and a command that only reads what
+ * this user can read will pass.
+ */
 const runShellCommand = async (
   command: string,
   timeoutMs: number,
   user: string | undefined,
 ): Promise<Outcome> => {
-  // The blocklist is applied here too, not only on the control plane. A check
-  // definition arrives over the config channel and is not covered by an exec
-  // grant, so this is the only guard left if that channel is ever wrong.
   const guard = validateCommand(command);
   if (!guard.ok) return down(`command rejected: ${guard.reason}`, 0);
   const start = Date.now();
@@ -216,6 +310,15 @@ const runShellCommand = async (
   return down(`exit ${res.code}: ${res.stderr.slice(0, 200)}`, latencyMs);
 };
 
+/**
+ * Run one check definition and attribute the outcome to its monitor.
+ *
+ * @param user - OS account command-running checks are dropped to when the agent
+ * has root.
+ * @returns Always a result, never a rejection: a probe that throws, times out
+ * or names an unknown type becomes a `down` with the reason attached, because a
+ * check that silently produces nothing is indistinguishable from a healthy one.
+ */
 export const runCheck = async (def: CheckDef, user?: string): Promise<CheckResult> => {
   const timeoutMs = Math.max(1, def.timeoutSeconds) * 1_000;
   let outcome: Outcome;
