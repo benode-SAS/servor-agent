@@ -1,8 +1,28 @@
-# Servor Agent
+<div align="center">
 
-This is the program Servor asks you to install on your servers. It is published
-in full so you can read what it does before you run it, and check that the
-binary you were given was built from this source.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
+  <img src=".github/assets/logo-light.svg" alt="Servor" width="240">
+</picture>
+
+<br><br>
+
+**The program Servor asks you to install on your servers.**<br>
+Published in full, so you can read what it does before you run it.
+
+<br>
+
+[![Build](https://github.com/benode-SAS/servor-agent/actions/workflows/build.yml/badge.svg)](https://github.com/benode-SAS/servor-agent/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/benode-SAS/servor-agent?label=release&color=06b6d4)](https://github.com/benode-SAS/servor-agent/releases/latest)
+[![Licence](https://img.shields.io/badge/licence-Apache--2.0-8b5cf6)](LICENSE)
+
+[![Signed execution](https://img.shields.io/badge/execution-signature%20required-10b981)](#how-a-command-is-authorised)
+[![No inbound port](https://img.shields.io/badge/network-outbound%20only-10b981)](#what-it-does)
+[![Reproducible](https://img.shields.io/badge/builds-reproducible%20%C2%B7%20attested-10b981)](#checking-the-binary-you-are-running)
+
+</div>
+
+---
 
 Installing an agent means giving a company the ability to run commands as root
 on your machines. That deserves more than a promise, so: about 1,400 lines,
