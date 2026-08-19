@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 64" fill="none" role="img" aria-label="Servor">
+  <defs>
+    <linearGradient id="servor-fg" x1="6" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="0.55" stop-color="#06b6d4"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+    <linearGradient id="servor-ft" x1="76" y1="20" x2="220" y2="44" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="1" stop-color="#334155"/>
+    </linearGradient>
+  </defs>
+  <rect x="3" y="3" width="58" height="58" rx="14" stroke="url(#servor-fg)" stroke-width="1.5" stroke-opacity="0.35"/>
+  <rect x="20" y="14" width="30" height="9" rx="4.5" fill="url(#servor-fg)"/>
+  <rect x="14" y="27.5" width="36" height="9" rx="4.5" fill="url(#servor-fg)"/>
+  <rect x="14" y="41" width="30" height="9" rx="4.5" fill="url(#servor-fg)"/>
+  <circle cx="25" cy="18.5" r="1.4" fill="#0b1220" fill-opacity="0.85"/>
+  <circle cx="19" cy="32" r="1.4" fill="#0b1220" fill-opacity="0.85"/>
+  <circle cx="19" cy="45.5" r="1.4" fill="#0b1220" fill-opacity="0.85"/>
+  <circle cx="50" cy="14" r="2.4" fill="#10b981"/>
+  <text x="78" y="44" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Inter, sans-serif" font-size="34" font-weight="600" letter-spacing="-0.03em" fill="url(#servor-ft)">Servor</text>
+</svg>
