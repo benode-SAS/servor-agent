@@ -7,184 +7,51 @@
 
 <br><br>
 
-**The program Servor asks you to install on your servers.**<br>
-Published in full, so you can read what it does before you run it.
+**The Servor agent** — supervision and command execution for the servers you
+already run.
 
 <br>
 
 [![Build](https://github.com/benode-SAS/servor-agent/actions/workflows/build.yml/badge.svg)](https://github.com/benode-SAS/servor-agent/actions/workflows/build.yml)
 [![Release](https://img.shields.io/github/v/release/benode-SAS/servor-agent?label=release&color=06b6d4)](https://github.com/benode-SAS/servor-agent/releases/latest)
 [![Licence](https://img.shields.io/badge/licence-Apache--2.0-8b5cf6)](LICENSE)
-
-[![Signed execution](https://img.shields.io/badge/execution-signature%20required-10b981)](#how-a-command-is-authorised)
-[![No inbound port](https://img.shields.io/badge/network-outbound%20only-10b981)](#what-it-does)
-[![Reproducible](https://img.shields.io/badge/builds-reproducible%20%C2%B7%20attested-10b981)](#checking-the-binary-you-are-running)
+[![Bun](https://img.shields.io/badge/bun-1.3-black)](https://bun.sh)
 
 </div>
 
 ---
 
-Installing an agent means giving a company the ability to run commands as root
-on your machines. That deserves more than a promise, so: about 1,400 lines,
-three dependencies, one file per concern. It is meant to be read in an
-afternoon, and this document is written for someone who has not decided yet.
-
-| | |
-| --- | --- |
-| **Runtime** | Bun, compiled to a single self-contained binary |
-| **Dependencies** | `@noble/curves`, `@noble/hashes`, `shell-quote` |
-| **Targets** | Linux x64/arm64 (glibc and musl), macOS x64/arm64, Windows x64 |
-| **Network** | Outbound only — no listening port |
-| **Licence** | Apache-2.0 |
-
----
-
-## What it does
-
-- **Dials out and stays connected.** A WebSocket to the control plane, opened
-  from your machine. It listens on nothing and accepts no inbound connection,
-  which is why it works behind NAT, a corporate firewall, or a network only
-  reachable through a VPN.
-- **Reports metrics** on an interval you set: CPU overall and per core, load,
-  memory and swap, disks per mount point, network, uptime, processes.
-- **Runs the checks it is told to run** — HTTP, TCP, SSL certificate expiry,
-  SSH, disk space, process presence, and custom scripts — and reports the
-  results. The TCP and TLS probes are pinned to `127.0.0.1`; an HTTP check dials
-  the URL its definition names, which is the point of it: reaching a service the
-  outside world cannot.
-- **Executes commands, but only signed ones.** See below; this is the part
-  worth reading.
-- **Updates itself**, and only from a binary carrying a valid signature from a
-  key compiled into it.
-
-## What it does not do
-
-Every security document lists strengths. The useful half is this one.
-
-- **It does not verify *who* asked.** It verifies that a command was signed by a
-  key its operator authorised. Whether that person was coerced, or their browser
-  compromised, is outside what this program can see.
-- **The list of authorised keys comes from the control plane.** That signing is
-  required is a constant in the source, not a setting — the control plane cannot
-  turn it off. But it does supply the key set, so a fully compromised one could
-  add a key of its own. Closing that needs the keys pinned at enrolment, which is
-  not implemented.
-- **An interactive shell is signed once, at open.** The grant covers opening the
-  session; the keystrokes after it are not individually signed. That is inherent
-  to a PTY, and it means the relay sits inside the trust boundary for as long as
-  the session lives.
-- **Scheduled checks carry no grant.** A check definition arrives over the
-  config channel. The command blocklist is applied to it locally, which is a
-  guard, not a proof. An HTTP check also dials whatever URL it is given, so the
-  config channel can make this agent issue outbound requests from inside your
-  network — that is the feature, and it is also its cost.
-- **The blocklist stops destruction, not disclosure.** It refuses `rm -rf /` and
-  an overwrite of `/etc/shadow`. It will not stop a command from *reading* a
-  file the agent's user can read.
-- **It runs as the user you configure.** Configure root, and it is root.
-
-If you find something that belongs on this list and is not on it, that is a
-security report — see [SECURITY.md](SECURITY.md).
-
-## How a command is authorised
-
-The property worth having is that **the server you are trusting with your fleet
-cannot execute on it**. Here is the mechanism, so you can judge whether it holds.
-
-An Ed25519 signing key is derived from the operator's vault private key, which
-is unwrapped in their browser and never sent anywhere. Only the public half ever
-reaches this agent. Every execution request is signed in that browser, relayed
-untouched by the control plane, and verified here — on your machine — before
-anything runs.
+A single compiled binary that connects out to [Servor](https://servor.benode.fr),
+reports what the machine is doing, runs the checks you configured, and executes
+the commands you approve. No port to open, no runtime to install.
 
 ```
-browser                        control plane                  your server
-  │                                  │                             │
-  ├─ sign(serverId, kind,            │                             │
-  │       command, nonce, ts) ──────►│── relayed verbatim ────────►│
-  │                                  │                             ├─ verify signature
-  │                                  │                             ├─ check nonce unseen
-  │                                  │                             ├─ check timestamp
-  │                                  │                             └─ run, or refuse
+┌─ your server ──────────────┐            ┌─ Servor ─────────┐
+│  servor-agent ─────────────┼── wss ────►│  control plane   │
+│    metrics, checks, exec   │  outbound  │                  │
+└────────────────────────────┘            └──────────────────┘
 ```
 
-Verification lives in [`src/tunnel.ts`](src/tunnel.ts); the signature format is
-in [`src/protocol/exec-sign.ts`](src/protocol/exec-sign.ts). The signed payload
-is length-prefixed field by field, so two different grants cannot produce the
-same bytes to sign.
+## Install
 
-Three things to check for yourself:
-
-1. **It fails closed.** With no authorised key, execution is refused. There is
-   no branch that runs a command when verification fails, and no setting that
-   turns verification off.
-2. **Replay is bounded.** A nonce table plus a timestamp window; the nonce is
-   remembered for longer than a signature can remain valid, so a grant cannot
-   come back once forgotten.
-3. **The relay cannot rewrite what it relays.** The command that is verified is
-   the command that runs — nothing is prefixed to it server-side, because a
-   `cd` or a `sudo` added in transit would no longer be covered by the
-   signature.
-
-## Checking the binary you are running
-
-Two independent methods, because they fail in different ways.
-
-**Provenance** — every released binary carries a signed attestation binding its
-digest to this repository, the commit it was built from, and the workflow that
-built it:
-
-```sh
-gh attestation verify servor-agent-linux-x64 --repo benode-SAS/servor-agent
-```
-
-This works from any machine and is the quickest way to confirm origin.
-
-**Rebuild it** — `bun build --compile` is deterministic here. Two independent CI
-runs of the same commit produce byte-identical binaries, and the checkout path
-does not affect the result. Both were measured rather than assumed.
-
-```sh
-bun install --frozen-lockfile && bun run build
-sha256sum dist/servor-agent-linux-x64     # compare with SHA256SUMS in the release
-```
-
-**The caveat, stated plainly:** the digest is stable per builder platform, not
-across them. The same source compiled on Windows and on Linux produces different
-bytes. A rebuild therefore reproduces the published hash only on **Linux x64
-with the pinned Bun version** — which is what the release workflow uses, and
-what builds the binaries the API serves. Elsewhere your rebuild will run
-correctly and hash differently; use the attestation there.
-
-## Auto-update
-
-A new build is installed only when its SHA-256 matches the manifest **and** that
-hash carries a valid Ed25519 signature from the key in
-[`src/pubkey.ts`](src/pubkey.ts).
-
-The checksum alone would not be enough: it is served by the same host as the
-binary, so it proves the download was not corrupted in transit and nothing about
-who produced it. Built without a public key, the agent refuses to update at all
-rather than installing something it cannot verify.
-
-Updates are applied when the agent is idle — never in the middle of a command or
-an open terminal.
+The agent is installed for you when you add a server in Servor. By hand: take
+the binary for your platform from the
+[latest release](https://github.com/benode-SAS/servor-agent/releases/latest),
+put it on `PATH`, write the config file below, run it under systemd.
 
 ## Configuration
 
-A single JSON file, `0600`, read at startup:
+One JSON file, mode `0600`:
 
 | Platform | Path |
 | --- | --- |
 | Linux, macOS | `/etc/servor-agent/config.json` |
 | Windows | `%ProgramData%\ServorAgent\config.json` |
 
-Override with `SERVOR_CONFIG`.
-
 ```json
 {
   "serverId": "uuid of this server",
-  "secret": "per-server HMAC secret, issued at enrolment",
+  "secret": "issued when the server is enrolled",
   "apiUrl": "https://api.servor.benode.fr",
   "intervalSeconds": 60,
   "mode": "tunnel",
@@ -192,46 +59,99 @@ Override with `SERVOR_CONFIG`.
 }
 ```
 
-`intervalSeconds` is clamped to 15–300. `mode` is `push` for metrics only, or
-`tunnel` to also accept signed commands. `user` is the OS account commands run
-as — omit it and they run as the agent's own user.
-
-## Layout
-
-| File | Responsibility |
+| Field | |
 | --- | --- |
-| `src/index.ts` | startup, the metric and config loops, lifecycle |
-| `src/tunnel.ts` | the outbound WebSocket, grant verification, shells |
-| `src/checks.ts` | the check types and how each is executed |
-| `src/metrics.ts` | reading the system |
-| `src/config.ts` | loading and atomically saving the config file |
-| `src/updater.ts` | download, checksum, signature, swap |
-| `src/protocol/` | copied from the control plane — see below |
+| `intervalSeconds` | delay between metric pushes, clamped to 15–300 |
+| `mode` | `push` for metrics only, `tunnel` to also accept commands |
+| `user` | OS account commands run as; omit to run as the agent's own user |
 
-`src/protocol/` holds the four files that decide whether a command runs. They
-also exist in Servor's own codebase, and are copied here rather than imported so
-that reading them does not require access to a private package. `bun run
-protocol:check` fails if the copies drift: a guard on your machine that
-disagrees with the guard on the server is worse than no guard at all.
+Set `SERVOR_CONFIG` to load the file from elsewhere.
+
+## What it collects
+
+CPU overall and per core, load average, memory and swap, disks per mount point,
+network counters, uptime, process count — every `intervalSeconds`.
+
+Checks are configured in Servor and run from here: HTTP, TCP, SSL certificate
+expiry, SSH, disk space, process presence, custom scripts. TCP and TLS probes
+are pinned to `127.0.0.1`; an HTTP check dials the URL you give it, which is the
+point — reaching a service that is not exposed publicly.
+
+## Execution
+
+Commands are signed in the browser by the operator who issued them, relayed
+untouched by Servor, and verified here before anything runs. The signing key is
+derived from a vault key that never leaves that browser, so the control plane
+carries grants it cannot forge.
+
+[`src/tunnel.ts`](src/tunnel.ts) checks the signature against the public keys it
+was given, that the grant names this server, that the timestamp is inside a
+window, and that the nonce is unused. Any of those failing means the command
+does not run; with no key present, nothing runs.
+
+Two things worth knowing up front:
+
+- A terminal session is signed when it opens, not per keystroke — a PTY cannot
+  work otherwise.
+- Scheduled checks arrive over the config channel and carry no signature. The
+  ones that run a shell go through the blocklist in
+  [`src/protocol/command-guards.ts`](src/protocol/command-guards.ts), which
+  refuses destructive and lockout commands.
+
+## Updates
+
+The agent replaces itself when Servor advertises a newer build, if the download
+matches the expected SHA-256 **and** that hash carries a valid Ed25519 signature
+from the key in [`src/pubkey.ts`](src/pubkey.ts). Built without a public key, it
+does not self-update.
+
+Swaps happen when the agent is idle, never during a command or an open terminal.
+
+## Verifying a binary
+
+Releases ship `SHA256SUMS` and a signed provenance attestation:
+
+```sh
+sha256sum servor-agent-linux-x64
+gh attestation verify servor-agent-linux-x64 --repo benode-SAS/servor-agent
+```
+
+You can also rebuild it: `bun build --compile` is deterministic, so on Linux x64
+with the pinned Bun version you get the same bytes as the release. Other builder
+platforms produce a working binary with a different hash.
 
 ## Building
 
 ```sh
 bun install
 bun run typecheck
-bun run protocol:check
-bun run build          # all seven targets into dist/
+bun run protocol:check    # vendored files still match their source
+bun run build             # all seven targets into dist/
 ```
+
+Targets: Linux x64/arm64 (glibc and musl), macOS x64/arm64, Windows x64.
+
+## Layout
+
+| | |
+| --- | --- |
+| `src/index.ts` | startup, metric and config loops |
+| `src/tunnel.ts` | outbound WebSocket, grant verification, shells |
+| `src/checks.ts` | the check types and how each runs |
+| `src/metrics.ts` | reading the system |
+| `src/config.ts` | loading and saving the config file |
+| `src/updater.ts` | download, verify, swap |
+| `src/protocol/` | shared with the control plane, copied in |
+
+`src/protocol/` holds four files that also live in Servor's own codebase, copied
+here so that reading this repository does not require a private package.
+`bun run protocol:check` fails if the copies drift.
 
 ## Contributing
 
-Patches are welcome, particularly on the parts that decide whether a command
-runs. Read [CONTRIBUTING.md](CONTRIBUTING.md) first — this repository is a
-mirror, and that changes how changes flow.
-
-Found a way to make this agent execute something it should not?
-[SECURITY.md](SECURITY.md), not a pull request.
+See [CONTRIBUTING.md](CONTRIBUTING.md) — this repository is a mirror, which
+changes how patches flow. Security reports go to [SECURITY.md](SECURITY.md).
 
 ## Licence
 
-Apache-2.0. Copyright BENODE SAS.
+Apache-2.0 — Copyright BENODE SAS.
