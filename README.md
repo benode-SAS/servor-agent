@@ -77,6 +77,36 @@ verifies the copies still match their source, and fails the build if they drift
 — a guard that disagrees with the one on the control plane is worse than no
 guard.
 
+## Checking that a binary came from this source
+
+Two independent ways, because they fail differently.
+
+**Provenance.** Every released binary carries a signed attestation binding its
+digest to this repository, this commit and the workflow that produced it:
+
+```sh
+gh attestation verify servor-agent-linux-x64 --repo benode-SAS/servor-agent
+```
+
+This holds regardless of your platform, and is what to use if you only want to
+confirm origin.
+
+**Rebuild it.** `bun build --compile` is deterministic here: two independent CI
+runs of the same commit produce byte-identical binaries, and the checkout path
+does not affect the result. Both were measured, not assumed.
+
+```sh
+bun install --frozen-lockfile && bun run build
+sha256sum dist/servor-agent-linux-x64      # compare against SHA256SUMS
+```
+
+**The honest caveat:** the digest is stable per builder platform, not across
+them. The same source compiled on Linux and on Windows yields different bytes.
+So a rebuild matches only on **Linux x64 with the pinned Bun version** — which
+is what the release workflow uses, and what builds the binaries the API serves.
+On macOS or Windows your rebuild will run correctly and hash differently; use
+the attestation there.
+
 ## Build
 
 ```sh
