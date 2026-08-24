@@ -8,10 +8,15 @@ Issues and pull requests are welcome.
 bun install
 bun run typecheck
 bun run protocol:check
+bun test
 bun run build
 ```
 
-CI runs the same, plus a compile of every target.
+CI runs the same on Linux and Windows, plus a compile of every target.
+
+A change to how a grant is verified, a command is guarded, or a check is graded
+needs a test with it. If the behaviour you are changing already has one, the
+change should show up as that test failing first.
 
 ## Two things specific to this repository
 

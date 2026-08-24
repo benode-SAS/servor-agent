@@ -31,6 +31,11 @@ jobs:
         run: bun run typecheck
       - name: Vendored protocol copies
         run: bun run protocol:check
+      # Inside `verify` rather than as a job of its own: `verify` is already a
+      # required check on main, so the tests gate merges without anyone having
+      # to remember to add a second one to the ruleset.
+      - name: Unit tests
+        run: bun test
 
   build:
     needs: verify

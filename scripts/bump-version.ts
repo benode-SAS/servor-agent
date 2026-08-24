@@ -26,7 +26,8 @@ if (!['patch', 'minor', 'major'].includes(kind)) {
   process.exit(1);
 }
 
-const file = join(import.meta.dir, '..', 'src', 'version.ts');
+// SERVOR_VERSION_FILE retargets the rewrite; nothing sets it in the pipeline.
+const file = process.env.SERVOR_VERSION_FILE ?? join(import.meta.dir, '..', 'src', 'version.ts');
 const source = readFileSync(file, 'utf-8');
 
 const match = source.match(/export const BUILD_VERSION = '(\d+)\.(\d+)\.(\d+)';/);

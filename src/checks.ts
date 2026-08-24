@@ -83,25 +83,35 @@ const wrapAsUser = (user: string | undefined, command: string): string[] => {
   return ['bash', '-lc', command];
 };
 
+/** Grace between the polite kill and the one that cannot be refused. */
+const SIGKILL_GRACE_MS = 2_000;
+
 /**
  * Spawn a command, capture both streams, and kill it once the deadline passes.
  *
  * @returns The exit code and captured output. A killed process reports the
  * signal's exit code, so a timeout surfaces as a non-zero result rather than a
  * thrown error.
+ *
+ * @remarks
+ * SIGTERM first, then SIGKILL. A script that traps TERM — or one whose child
+ * survives it — would otherwise never exit, and since checks run one after
+ * another that single process stalls the whole loop rather than one monitor.
  */
 const sh = async (
   argv: string[],
   timeoutMs: number,
 ): Promise<{ code: number; stdout: string; stderr: string }> => {
   const proc = Bun.spawn(argv, { stdout: 'pipe', stderr: 'pipe' });
-  const timer = setTimeout(() => proc.kill(), timeoutMs);
+  const term = setTimeout(() => proc.kill(), timeoutMs);
+  const hard = setTimeout(() => proc.kill('SIGKILL'), timeoutMs + SIGKILL_GRACE_MS);
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
   ]);
   const code = await proc.exited;
-  clearTimeout(timer);
+  clearTimeout(term);
+  clearTimeout(hard);
   return { code, stdout, stderr };
 };
 
@@ -150,13 +160,18 @@ const runHttp = async (cfg: Record<string, unknown>, timeoutMs: number): Promise
 /**
  * Open a TCP connection to a local port, optionally waiting for a banner.
  *
+ * @returns `up` as soon as the connection is established when no banner is
+ * expected; otherwise once the banner contains the expected substring.
+ *
  * @remarks
  * Pinned to 127.0.0.1: this exists to prove a service is listening on this
  * machine, and refusing to dial elsewhere keeps the check from being usable as
  * a port scanner driven from the control plane.
  *
- * @returns `up` as soon as the connection is established when no banner is
- * expected; otherwise once the banner contains the expected substring.
+ * `setTimeout` on a socket is an *idle* timeout: every byte received resets it.
+ * A peer that dribbles one non-matching byte per second would therefore keep a
+ * banner check alive indefinitely, and with it the whole sequential check loop.
+ * The absolute deadline below is what actually bounds the probe.
  */
 const runTcp = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcome> =>
   new Promise((resolve) => {
@@ -166,11 +181,17 @@ const runTcp = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcom
     const socket = createConnection({ host: '127.0.0.1', port });
     socket.setTimeout(timeoutMs);
     let banner = '';
+    let deadline: ReturnType<typeof setTimeout>;
     const done = (o: Outcome) => {
+      clearTimeout(deadline);
       socket.removeAllListeners();
       socket.destroy();
       resolve(o);
     };
+    deadline = setTimeout(
+      () => done(down('tcp check deadline exceeded', Date.now() - start)),
+      timeoutMs,
+    );
     socket.on('connect', () => {
       if (!match) done(ok(Date.now() - start));
     });
@@ -186,6 +207,42 @@ const runTcp = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcom
         done(down('banner match not found', Date.now() - start));
     });
   });
+
+/**
+ * Grade a peer certificate by how long it has left.
+ *
+ * @param cert - What the handshake produced; a peer that sent none is `down`.
+ * @param warnDays - Days of remaining life below which the check degrades.
+ * @param now - Reference instant, injectable so the boundaries are testable.
+ *
+ * @returns `down` past expiry, `degraded` inside the warning window, `up`
+ * otherwise; the remaining days travel in the metadata either way.
+ *
+ * @remarks
+ * Separate from the socket work because this is the part that decides whether
+ * someone is woken up. `daysLeft` floors, so a certificate with eleven hours
+ * left reads as 0 and is treated as expired rather than as nearly fine.
+ */
+export const gradeCertificate = (
+  cert: Pick<PeerCertificate, 'valid_to' | 'issuer' | 'subject'> | null | undefined,
+  warnDays: number,
+  latencyMs: number,
+  now: number = Date.now(),
+): Outcome => {
+  if (!cert?.valid_to) return down('no peer certificate', latencyMs);
+  const expiry = new Date(cert.valid_to).getTime();
+  if (Number.isNaN(expiry)) return down('unreadable certificate expiry', latencyMs);
+  const daysLeft = Math.floor((expiry - now) / DAY_MS);
+  const meta = {
+    issuer: cert.issuer?.CN ?? null,
+    subject: cert.subject?.CN ?? null,
+    validTo: cert.valid_to,
+    daysLeft,
+  };
+  if (daysLeft <= 0) return down('certificate expired', latencyMs, meta);
+  if (daysLeft <= warnDays) return degraded(`certificate expires in ${daysLeft}d`, latencyMs, meta);
+  return ok(latencyMs, meta);
+};
 
 /**
  * Handshake with a local TLS port and report how long the certificate has left.
@@ -211,26 +268,22 @@ const runSsl = (cfg: Record<string, unknown>, timeoutMs: number): Promise<Outcom
       rejectUnauthorized: false,
       timeout: timeoutMs,
     });
+    // Same idle-timeout caveat as runTcp: a handshake that never completes but
+    // keeps bytes moving would never trip `timeout`.
+    let deadline: ReturnType<typeof setTimeout>;
     const done = (o: Outcome) => {
+      clearTimeout(deadline);
       socket.removeAllListeners();
       socket.destroy();
       resolve(o);
     };
+    deadline = setTimeout(
+      () => done(down('tls handshake deadline exceeded', Date.now() - start)),
+      timeoutMs,
+    );
     socket.on('secureConnect', () => {
-      const latencyMs = Date.now() - start;
       const cert = socket.getPeerCertificate(false) as PeerCertificate;
-      if (!cert?.valid_to) return done(down('no peer certificate', latencyMs));
-      const daysLeft = Math.floor((new Date(cert.valid_to).getTime() - Date.now()) / DAY_MS);
-      const meta = {
-        issuer: cert.issuer?.CN ?? null,
-        subject: cert.subject?.CN ?? null,
-        validTo: cert.valid_to,
-        daysLeft,
-      };
-      if (daysLeft <= 0) return done(down('certificate expired', latencyMs, meta));
-      if (daysLeft <= warnDays)
-        return done(degraded(`certificate expires in ${daysLeft}d`, latencyMs, meta));
-      done(ok(latencyMs, meta));
+      done(gradeCertificate(cert, warnDays, Date.now() - start));
     });
     socket.on('timeout', () => done(down('tls handshake timeout', Date.now() - start)));
     socket.on('error', (e) => done(down(e.message, Date.now() - start)));
@@ -310,6 +363,9 @@ const runShellCommand = async (
   return down(`exit ${res.code}: ${res.stderr.slice(0, 200)}`, latencyMs);
 };
 
+/** Slack over a probe's own deadline before the backstop below takes over. */
+const BACKSTOP_GRACE_MS = 5_000;
+
 /**
  * Run one check definition and attribute the outcome to its monitor.
  *
@@ -318,38 +374,57 @@ const runShellCommand = async (
  * @returns Always a result, never a rejection: a probe that throws, times out
  * or names an unknown type becomes a `down` with the reason attached, because a
  * check that silently produces nothing is indistinguishable from a healthy one.
+ *
+ * @remarks
+ * The outer deadline is a backstop, not the mechanism: each probe bounds
+ * itself, and this only fires if one fails to. It exists because checks are
+ * awaited one after another and the loop schedules its next tick only once the
+ * batch resolves — so a single probe that never settles does not degrade one
+ * monitor, it silently stops every check on the host. Failing loudly as a
+ * `down` is the lesser outcome.
+ *
+ * A probe caught here may still be holding a socket or a child process; that is
+ * why each one has its own deadline, and why this one landing is worth treating
+ * as a bug rather than as normal operation.
  */
 export const runCheck = async (def: CheckDef, user?: string): Promise<CheckResult> => {
   const timeoutMs = Math.max(1, def.timeoutSeconds) * 1_000;
-  let outcome: Outcome;
-  try {
+  let backstopTimer: ReturnType<typeof setTimeout> | undefined;
+  const backstop = new Promise<Outcome>((resolve) => {
+    backstopTimer = setTimeout(
+      () => resolve(down(`check exceeded its deadline (${timeoutMs}ms)`)),
+      timeoutMs + BACKSTOP_GRACE_MS,
+    );
+    backstopTimer.unref?.();
+  });
+  const probe = async (): Promise<Outcome> => {
     switch (def.type) {
       case 'http':
-        outcome = await runHttp(def.config, timeoutMs);
-        break;
+        return runHttp(def.config, timeoutMs);
       case 'tcp':
-        outcome = await runTcp(def.config, timeoutMs);
-        break;
+        return runTcp(def.config, timeoutMs);
       case 'ssl':
-        outcome = await runSsl(def.config, timeoutMs);
-        break;
+        return runSsl(def.config, timeoutMs);
       case 'disk':
-        outcome = await runDisk(def.config, timeoutMs);
-        break;
+        return runDisk(def.config, timeoutMs);
       case 'process':
-        outcome = await runProcess(def.config, timeoutMs);
-        break;
+        return runProcess(def.config, timeoutMs);
       case 'custom_script':
-        outcome = await runShellCommand(String(def.config.command ?? ''), timeoutMs, user);
-        break;
+        return runShellCommand(String(def.config.command ?? ''), timeoutMs, user);
       case 'ssh':
-        outcome = await runShellCommand(String(def.config.command ?? 'echo ok'), timeoutMs, user);
-        break;
+        return runShellCommand(String(def.config.command ?? 'echo ok'), timeoutMs, user);
       default:
-        outcome = down('unknown check type');
+        return down('unknown check type');
     }
+  };
+
+  let outcome: Outcome;
+  try {
+    outcome = await Promise.race([probe(), backstop]);
   } catch (e) {
     outcome = down((e as Error).message);
+  } finally {
+    clearTimeout(backstopTimer);
   }
   return { monitorId: def.id, ...outcome };
 };
