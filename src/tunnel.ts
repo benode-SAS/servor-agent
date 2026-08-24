@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import type { AgentConfig } from './config';
 import { createGrantVerifier, type GrantVerifier } from './grant';
+import { canonicalAgentMessage } from './protocol/agent-hmac';
 
 // The execution policy arrives from the control plane (fetchConfig) before the
 // tunnel is necessarily up, so the key set is held here and handed to the
@@ -329,7 +330,14 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
     ws.onopen = () => {
       const ts = String(Math.floor(Date.now() / 1000));
       const sig = createHmac('sha256', cfg.secret)
-        .update(`${ts}.tunnel:${cfg.serverId}`)
+        .update(
+          canonicalAgentMessage({
+            kind: 'tunnel',
+            serverId: cfg.serverId,
+            timestamp: ts,
+            body: `tunnel:${cfg.serverId}`,
+          }),
+        )
         .digest('hex');
       send({ type: 'init', ts, sig });
     };

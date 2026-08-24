@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { type CheckDef, type CheckResult, runCheck as defaultRunCheck } from './checks';
 import { type AgentConfig, saveConfig as defaultSaveConfig } from './config';
 import { collect as defaultCollect } from './metrics';
+import { type AgentMessageKind, canonicalAgentMessage } from './protocol/agent-hmac';
 import { setExecPolicy as defaultSetExecPolicy, startTunnel as defaultStartTunnel } from './tunnel';
 import { stageUpdate as defaultStageUpdate } from './updater';
 import { BUILD_VERSION } from './version';
@@ -50,7 +51,7 @@ export type AgentDeps = {
 export type Agent = {
   start: () => void;
   stop: () => void;
-  sign: (payload: string) => { ts: string; sig: string };
+  sign: (kind: AgentMessageKind, payload: string) => { ts: string; sig: string };
   clampInterval: (s: number) => number;
   fetchConfig: () => Promise<void>;
   pushMetrics: () => Promise<void>;
@@ -97,6 +98,10 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
   /**
    * Authenticate one outbound request by HMAC-ing the per-server secret.
    *
+   * @param kind - What the signature is allowed to authenticate. One secret
+   * signs several kinds of request, so it is inside the signed bytes: without
+   * it, a signature lifted from one exchange authenticates another whose body
+   * happens to match.
    * @param payload - Exact bytes being authenticated: the JSON body for a push, or
    * a short descriptor such as `config:<serverId>` for a GET.
    * @returns The timestamp and hex signature to send as `x-servor-timestamp` and
@@ -108,9 +113,11 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
    * agent; it authorises nothing in the other direction — a command still needs a
    * grant signed by an operator key, which this secret cannot produce.
    */
-  const sign = (payload: string) => {
+  const sign = (kind: AgentMessageKind, payload: string) => {
     const ts = String(Math.floor(now() / 1000));
-    const sig = createHmac('sha256', cfg.secret).update(`${ts}.${payload}`).digest('hex');
+    const sig = createHmac('sha256', cfg.secret)
+      .update(canonicalAgentMessage({ kind, serverId: cfg.serverId, timestamp: ts, body: payload }))
+      .digest('hex');
     return { ts, sig };
   };
 
@@ -148,7 +155,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     try {
       const payload = await collect(BUILD_VERSION);
       const body = JSON.stringify(payload);
-      const { ts, sig } = sign(body);
+      const { ts, sig } = sign('ingest', body);
       await fetchImpl(`${cfg.apiUrl}/agent/ingest/${cfg.serverId}`, {
         method: 'POST',
         headers: {
@@ -201,7 +208,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
    */
   const fetchConfig = async () => {
     try {
-      const { ts, sig } = sign(`config:${cfg.serverId}`);
+      const { ts, sig } = sign('config', `config:${cfg.serverId}`);
       const res = await fetchImpl(`${cfg.apiUrl}/agent/config/${cfg.serverId}`, {
         headers: { 'x-servor-timestamp': ts, 'x-servor-signature': sig },
       });
@@ -244,7 +251,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
   const pushResults = async (results: CheckResult[]) => {
     try {
       const body = JSON.stringify({ results });
-      const { ts, sig } = sign(body);
+      const { ts, sig } = sign('result', body);
       await fetchImpl(`${cfg.apiUrl}/agent/checks/${cfg.serverId}`, {
         method: 'POST',
         headers: {
