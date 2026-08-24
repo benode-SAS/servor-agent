@@ -6,17 +6,22 @@ import { UPDATE_PUBKEY } from './pubkey';
 /**
  * Identify which of the published builds fits this machine, e.g. `linux-x64`.
  *
+ * @param platform - Defaults to the running platform; a parameter only so the
+ * mapping can be exercised for hosts this process is not running on.
+ * @param arch - Defaults to the running architecture.
+ *
  * @remarks
  * Anything that is not Windows or macOS is treated as Linux, and any
  * architecture that is not arm64 as x64. The key selects both the download and
  * the checksum it is checked against, so a wrong guess cannot install a foreign
  * binary — it fails verification and no update happens.
  */
-export const platformKey = (): string => {
-  const os =
-    process.platform === 'win32' ? 'windows' : process.platform === 'darwin' ? 'darwin' : 'linux';
-  const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-  return `${os}-${arch}`;
+export const platformKey = (
+  platform: string = process.platform,
+  arch: string = process.arch,
+): string => {
+  const os = platform === 'win32' ? 'windows' : platform === 'darwin' ? 'darwin' : 'linux';
+  return `${os}-${arch === 'arm64' ? 'arm64' : 'x64'}`;
 };
 
 /** What the control plane advertises: a version and, per platform, its digest and signature. */

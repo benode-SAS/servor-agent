@@ -49,7 +49,7 @@ const num = (s: string | undefined) => {
 };
 
 /** Cumulative jiffies since boot, for one CPU line of /proc/stat. */
-type CpuSnap = { busy: number; total: number };
+export type CpuSnap = { busy: number; total: number };
 
 /**
  * Turn /proc/stat into cumulative busy/total counters, keyed `cpu`, `cpu0`, …
@@ -61,16 +61,179 @@ type CpuSnap = { busy: number; total: number };
  * left out because the kernel already counts them inside user time — adding
  * them would inflate busy above total.
  */
-const parseCpuLines = (raw: string): Map<string, CpuSnap> => {
+export const parseCpuLines = (raw: string): Map<string, CpuSnap> => {
   const map = new Map<string, CpuSnap>();
   for (const line of raw.split('\n')) {
     if (!line.startsWith('cpu')) continue;
     const f = line.trim().split(/\s+/);
-    const key = f[0]!;
+    const key = f[0];
+    if (!key) continue;
     const v = f.slice(1).map((x) => Number.parseInt(x, 10) || 0);
     const idle = (v[3] ?? 0) + (v[4] ?? 0);
     const busy = (v[0] ?? 0) + (v[1] ?? 0) + (v[2] ?? 0) + (v[5] ?? 0) + (v[6] ?? 0) + (v[7] ?? 0);
     map.set(key, { busy, total: busy + idle });
+  }
+  return map;
+};
+
+/** Overall and per-core usage between two /proc/stat snapshots. */
+export type CpuUsage = {
+  /** Percentage across all cores, or `null` when the `cpu` line is missing from either snapshot. */
+  cpuPercent: number | null;
+  cpus: Array<{ core: number; percent: number }>;
+};
+
+/**
+ * Turn two /proc/stat snapshots into a usage percentage per CPU line.
+ *
+ * @remarks
+ * A zero delta — the counters did not move, or the same snapshot was passed
+ * twice — is reported as 0 rather than dividing by it. A core present in the
+ * second snapshot but not the first is left out entirely: there is no interval
+ * to measure it over, and reporting it as idle would be a lie.
+ */
+export const computeCpuUsage = (s1: Map<string, CpuSnap>, s2: Map<string, CpuSnap>): CpuUsage => {
+  const pct = (k: string) => {
+    const a = s1.get(k);
+    const b = s2.get(k);
+    if (!a || !b) return null;
+    const dt = b.total - a.total;
+    return dt > 0 ? Math.round(((b.busy - a.busy) / dt) * 1000) / 10 : 0;
+  };
+  const cpus: Array<{ core: number; percent: number }> = [];
+  for (const k of s2.keys()) {
+    if (k === 'cpu') continue;
+    const p = pct(k);
+    if (p != null) cpus.push({ core: Number.parseInt(k.slice(3), 10), percent: p });
+  }
+  cpus.sort((a, b) => a.core - b.core);
+  return { cpuPercent: pct('cpu'), cpus };
+};
+
+/**
+ * Read /proc/meminfo into its kB values.
+ *
+ * @returns Only the keys actually present. A key the kernel did not report is
+ * absent from the map rather than zero, so a caller can tell "no swap
+ * configured" from "swap is empty".
+ */
+export const parseMeminfo = (raw: string): Map<string, number> => {
+  const map = new Map<string, number>();
+  for (const line of raw.split('\n')) {
+    const m = line.match(/^([^\s:]+):\s+(\d+)/);
+    if (m?.[1] && m[2]) map.set(m[1], Number.parseInt(m[2], 10));
+  }
+  return map;
+};
+
+/**
+ * Total the receive and transmit byte counters across real interfaces.
+ *
+ * @remarks
+ * Loopback is excluded: traffic a host sends to itself is not network usage,
+ * and on a busy box it dwarfs the counters anyone actually wants to see.
+ */
+export const parseNetDev = (raw: string): { rx: number; tx: number } => {
+  let rx = 0;
+  let tx = 0;
+  for (const line of raw.split('\n').slice(2)) {
+    const [iface, rest] = line.split(':');
+    if (!rest || iface?.trim() === 'lo') continue;
+    const f = rest.trim().split(/\s+/);
+    rx += Number.parseInt(f[0] ?? '0', 10) || 0;
+    tx += Number.parseInt(f[8] ?? '0', 10) || 0;
+  }
+  return { rx, tx };
+};
+
+/** One filesystem as reported by `df -Pk`, converted to gigabytes. */
+export type DiskEntry = { mount: string; totalGb: number; usedGb: number; usedPct: number };
+
+/** Every filesystem `df` listed, plus their totals. */
+export type DfSummary = { disks: DiskEntry[]; totalGb: number; usedGb: number };
+
+/**
+ * Parse `df -Pk` output into per-filesystem sizes and their totals.
+ *
+ * @param mountIndex - Column the mount point starts at: 5 on Linux, 8 on macOS,
+ * whose `df` inserts the inode columns before it.
+ *
+ * @remarks
+ * The mount point is everything from that column to the end of the line, not
+ * just the next field: `df` does not escape spaces, so a mount point that
+ * contains one would otherwise be truncated at the first space and reported
+ * under a name no operator would recognise. A line that is too short, or whose
+ * mount point is not an absolute path, is skipped rather than parsed into
+ * nonsense.
+ */
+export const parseDf = (raw: string, mountIndex: number): DfSummary => {
+  const disks: DiskEntry[] = [];
+  let totalGb = 0;
+  let usedGb = 0;
+  for (const line of raw.split('\n').slice(1)) {
+    const f = line.trim().split(/\s+/);
+    if (f.length <= mountIndex) continue;
+    const mount = f.slice(mountIndex).join(' ');
+    if (!mount.startsWith('/')) continue;
+    const tg = (Number.parseInt(f[1] ?? '', 10) || 0) / 1048576;
+    const ug = (Number.parseInt(f[2] ?? '', 10) || 0) / 1048576;
+    disks.push({
+      mount,
+      totalGb: Math.round(tg * 100) / 100,
+      usedGb: Math.round(ug * 100) / 100,
+      usedPct: tg > 0 ? Math.round((ug / tg) * 1000) / 10 : 0,
+    });
+    totalGb += tg;
+    usedGb += ug;
+  }
+  return { disks, totalGb, usedGb };
+};
+
+/** One process from `ps -eo pid=,pcpu=,pmem=,comm=`. */
+export type ProcessEntry = {
+  pid: number;
+  cpuPct: number | undefined;
+  memPct: number | undefined;
+  name: string;
+};
+
+/**
+ * Take the busiest processes off `ps` output.
+ *
+ * @remarks
+ * The command name is rejoined from the remaining fields, so a name containing
+ * a space survives. A line without a usable pid is dropped, which also disposes
+ * of the empty string an empty `ps` output splits into.
+ */
+export const parsePs = (raw: string, limit = 5): ProcessEntry[] =>
+  raw
+    .split('\n')
+    .slice(0, limit)
+    .map((l) => {
+      const f = l.trim().split(/\s+/);
+      return {
+        pid: Number.parseInt(f[0] ?? '0', 10) || 0,
+        cpuPct: num(f[1]),
+        memPct: num(f[2]),
+        name: f.slice(3).join(' ').slice(0, 60),
+      };
+    })
+    .filter((p) => p.pid > 0);
+
+/**
+ * Read /etc/os-release into its key/value pairs, with quotes stripped.
+ *
+ * @returns Only the keys the file actually declares; a distro that omits
+ * `VERSION_ID` yields no entry for it rather than an empty one.
+ */
+export const parseOsRelease = (raw: string): Map<string, string> => {
+  const map = new Map<string, string>();
+  for (const line of raw.split('\n')) {
+    const eq = line.indexOf('=');
+    if (eq <= 0 || line.trimStart().startsWith('#')) continue;
+    const key = line.slice(0, eq).trim();
+    const value = line.slice(eq + 1).trim();
+    map.set(key, value.replace(/^"(.*)"$/, '$1').replace(/^'(.*)'$/, '$1'));
   }
   return map;
 };
@@ -89,24 +252,10 @@ const collectLinux = async (version: string): Promise<Payload> => {
   const s1 = parseCpuLines(readProc('/proc/stat'));
   await sleep(1000);
   const s2 = parseCpuLines(readProc('/proc/stat'));
-  const pct = (k: string) => {
-    const a = s1.get(k);
-    const b = s2.get(k);
-    if (!a || !b) return null;
-    const dt = b.total - a.total;
-    return dt > 0 ? Math.round(((b.busy - a.busy) / dt) * 1000) / 10 : 0;
-  };
-  const cpuPercent = pct('cpu');
-  const cpus: Array<{ core: number; percent: number }> = [];
-  for (const k of s2.keys()) {
-    if (k === 'cpu') continue;
-    const p = pct(k);
-    if (p != null) cpus.push({ core: Number.parseInt(k.slice(3), 10), percent: p });
-  }
-  cpus.sort((a, b) => a.core - b.core);
+  const { cpuPercent, cpus } = computeCpuUsage(s1, s2);
 
-  const mem = readProc('/proc/meminfo');
-  const memVal = (key: string) => num(mem.match(new RegExp(`^${key}:\\s+(\\d+)`, 'm'))?.[1]) ?? 0;
+  const mem = parseMeminfo(readProc('/proc/meminfo'));
+  const memVal = (key: string) => mem.get(key) ?? 0;
   const memTotal = memVal('MemTotal');
   const memAvail = memVal('MemAvailable');
   const cached = memVal('Cached') + memVal('Buffers');
@@ -116,52 +265,14 @@ const collectLinux = async (version: string): Promise<Payload> => {
   const [load1, load5, load15] = readProc('/proc/loadavg').split(/\s+/).map(num);
   const uptime = num(readProc('/proc/uptime').split(/\s+/)[0]);
 
-  let rx = 0;
-  let tx = 0;
-  for (const line of readProc('/proc/net/dev').split('\n').slice(2)) {
-    const [iface, rest] = line.split(':');
-    if (!rest || iface?.trim() === 'lo') continue;
-    const f = rest.trim().split(/\s+/);
-    rx += Number.parseInt(f[0] ?? '0', 10) || 0;
-    tx += Number.parseInt(f[8] ?? '0', 10) || 0;
-  }
+  const { rx, tx } = parseNetDev(readProc('/proc/net/dev'));
 
   const df = sh(['df', '-Pk', '-x', 'tmpfs', '-x', 'devtmpfs', '-x', 'overlay', '-x', 'squashfs']);
-  const disks: Array<{ mount: string; totalGb: number; usedGb: number; usedPct: number }> = [];
-  let diskTotalGb = 0;
-  let diskUsedGb = 0;
-  for (const line of df.split('\n').slice(1)) {
-    const f = line.trim().split(/\s+/);
-    if (f.length < 6) continue;
-    const tg = (Number.parseInt(f[1]!, 10) || 0) / 1048576;
-    const ug = (Number.parseInt(f[2]!, 10) || 0) / 1048576;
-    disks.push({
-      mount: f[5]!,
-      totalGb: Math.round(tg * 100) / 100,
-      usedGb: Math.round(ug * 100) / 100,
-      usedPct: tg > 0 ? Math.round((ug / tg) * 1000) / 10 : 0,
-    });
-    diskTotalGb += tg;
-    diskUsedGb += ug;
-  }
+  const { disks, totalGb: diskTotalGb, usedGb: diskUsedGb } = parseDf(df, 5);
 
-  const psOut = sh(['ps', '-eo', 'pid=,pcpu=,pmem=,comm=', '--sort=-pcpu']);
-  const topProcesses = psOut
-    .split('\n')
-    .slice(0, 5)
-    .map((l) => {
-      const f = l.trim().split(/\s+/);
-      return {
-        pid: Number.parseInt(f[0] ?? '0', 10) || 0,
-        cpuPct: num(f[1]),
-        memPct: num(f[2]),
-        name: f.slice(3).join(' ').slice(0, 60),
-      };
-    })
-    .filter((p) => p.pid > 0);
+  const topProcesses = parsePs(sh(['ps', '-eo', 'pid=,pcpu=,pmem=,comm=', '--sort=-pcpu']));
 
-  const osRelease = readProc('/etc/os-release');
-  const orVal = (k: string) => osRelease.match(new RegExp(`^${k}="?([^"\\n]*)"?`, 'm'))?.[1];
+  const osRelease = parseOsRelease(readProc('/etc/os-release'));
   const procCount = sh(['bash', '-c', 'ls -d /proc/[0-9]* 2>/dev/null | wc -l']);
 
   return {
@@ -172,8 +283,8 @@ const collectLinux = async (version: string): Promise<Payload> => {
     collectedAt: new Date().toISOString(),
     specs: {
       osFamily: 'linux',
-      osDistro: orVal('NAME'),
-      osVersion: orVal('VERSION_ID'),
+      osDistro: osRelease.get('NAME'),
+      osVersion: osRelease.get('VERSION_ID'),
       kernelVersion: sh(['uname', '-r']),
       architecture: sh(['uname', '-m']),
       cpuCount: Number.parseInt(sh(['nproc']), 10) || cpus.length || undefined,
@@ -227,24 +338,7 @@ const collectDarwin = (version: string): Payload => {
     .split(/\s+/)
     .map(num);
 
-  const df = sh(['df', '-Pk']);
-  const disks: Array<{ mount: string; totalGb: number; usedGb: number; usedPct: number }> = [];
-  let diskTotalGb = 0;
-  let diskUsedGb = 0;
-  for (const line of df.split('\n').slice(1)) {
-    const f = line.trim().split(/\s+/);
-    if (f.length < 9 || !f[8]?.startsWith('/')) continue;
-    const tg = (Number.parseInt(f[1]!, 10) || 0) / 1048576;
-    const ug = (Number.parseInt(f[2]!, 10) || 0) / 1048576;
-    disks.push({
-      mount: f[8]!,
-      totalGb: Math.round(tg * 100) / 100,
-      usedGb: Math.round(ug * 100) / 100,
-      usedPct: tg > 0 ? Math.round((ug / tg) * 1000) / 10 : 0,
-    });
-    diskTotalGb += tg;
-    diskUsedGb += ug;
-  }
+  const { disks, totalGb: diskTotalGb, usedGb: diskUsedGb } = parseDf(sh(['df', '-Pk']), 8);
 
   return {
     v: 1,

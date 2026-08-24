@@ -28,7 +28,10 @@ import { join } from 'node:path';
 type Entry = { source: string; sha256: string };
 
 // The leading-slash strip turns a Windows file URL path (/C:/…) back into a path.
-const here = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+// SERVOR_AGENT_DIR retargets the whole check; nothing sets it in the pipeline.
+const here =
+  process.env.SERVOR_AGENT_DIR ??
+  new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 const repoRoot = join(here, '..', '..');
 const manifestPath = join(here, 'src', 'protocol', 'VENDORED.json');
 

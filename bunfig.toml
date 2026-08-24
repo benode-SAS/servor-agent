@@ -1,0 +1,13 @@
+# Coverage is opt-in via `bun test --coverage` so a plain `bun test` stays fast;
+# the threshold below only applies when it is on.
+[test]
+coverageReporter = ["text", "lcov"]
+coverageSkipTestFiles = true
+
+# Deliberately below what a Linux run reaches: ten tests are skipped on Windows
+# (df, pgrep, runuser), and metrics.ts carries whole collectors for macOS and
+# Windows that no runner exercises. Raise it once a CI run reports the real
+# floor — never lower it to make a build pass.
+[test.coverageThreshold]
+line = 0.80
+function = 0.80

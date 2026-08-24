@@ -144,10 +144,17 @@ platforms produce a working binary with a different hash.
 bun install
 bun run typecheck
 bun run protocol:check    # vendored files still match their source
+bun test                  # unit suite
 bun run build             # all seven targets into dist/
 ```
 
 Targets: Linux x64/arm64 (glibc and musl), macOS x64/arm64, Windows x64.
+
+The tests run on Linux and Windows in CI. The ones worth reading first are in
+[`src/grant.test.ts`](src/grant.test.ts): replay, a grant minted for another
+server, an `exec` grant reused to open a shell, timestamps either side of the
+acceptance window, and what happens with no authorized key — the properties the
+section above claims, written down as assertions.
 
 ## Layout
 
