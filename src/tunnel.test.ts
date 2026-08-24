@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
 import { x25519 } from '@noble/curves/ed25519';
 import type { AgentConfig } from './config';
+import { canonicalAgentMessage } from './protocol/agent-hmac';
 import { type ExecGrant, execPublicKeyFromVault, signExecGrant } from './protocol/exec-sign';
 import { setExecPolicy, startTunnel } from './tunnel';
 
@@ -227,7 +228,14 @@ describe('handshake', () => {
     const init = socket().sent[0] ?? {};
     expect(init.type).toBe('init');
     const expected = createHmac('sha256', SECRET)
-      .update(`${String(init.ts)}.tunnel:${SERVER_ID}`)
+      .update(
+        canonicalAgentMessage({
+          kind: 'tunnel',
+          serverId: SERVER_ID,
+          timestamp: String(init.ts),
+          body: `tunnel:${SERVER_ID}`,
+        }),
+      )
       .digest('hex');
     expect(init.sig).toBe(expected);
   });

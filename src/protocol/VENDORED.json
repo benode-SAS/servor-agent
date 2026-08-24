@@ -14,5 +14,9 @@
   "command-blacklist.ts": {
     "source": "packages/shared/src/constants/command-blacklist.ts",
     "sha256": "972d5b78b8de5c0b6f56db9cbc388b223b61c770cc54a39433f9c86533f109e5"
+  },
+  "agent-hmac.ts": {
+    "source": "packages/shared/src/crypto/agent-hmac.ts",
+    "sha256": "eb267a2764c59ea97c83b6a98294c9249dabca53a048e814db83908c55b607d4"
   }
 }

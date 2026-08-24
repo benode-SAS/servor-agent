@@ -6,6 +6,7 @@ import type { CheckDef, CheckResult } from './checks';
 import type { AgentConfig } from './config';
 import { createGrantVerifier } from './grant';
 import type { Payload } from './metrics';
+import { type AgentMessageKind, canonicalAgentMessage } from './protocol/agent-hmac';
 import { execPublicKeyFromVault } from './protocol/exec-sign';
 import { BUILD_VERSION } from './version';
 
@@ -55,8 +56,10 @@ const json = (body: unknown, status = 200) =>
 /** Let every already-scheduled promise chain settle before asserting. */
 const flush = () => Bun.sleep(1);
 
-const hmac = (secret: string, ts: string, payload: string) =>
-  createHmac('sha256', secret).update(`${ts}.${payload}`).digest('hex');
+const hmac = (secret: string, ts: string, kind: AgentMessageKind, payload: string) =>
+  createHmac('sha256', secret)
+    .update(canonicalAgentMessage({ kind, serverId: SERVER_ID, timestamp: ts, body: payload }))
+    .digest('hex');
 
 const pubkeyB64 = () =>
   Buffer.from(execPublicKeyFromVault(x25519.utils.randomPrivateKey())).toString('base64');
@@ -156,33 +159,47 @@ describe('interval clamping', () => {
 describe('request signing', () => {
   test('the signature covers the timestamp as well as the payload', () => {
     const { agent } = harness();
-    const { ts, sig } = agent.sign('body');
+    const { ts, sig } = agent.sign('ingest', 'body');
     expect(ts).toBe(String(Math.floor(clock / 1000)));
-    expect(sig).toBe(hmac(SECRET, ts, 'body'));
+    expect(sig).toBe(hmac(SECRET, ts, 'ingest', 'body'));
   });
 
   test('the same payload signed at another moment gives another signature', () => {
     const { agent } = harness();
-    const first = agent.sign('body');
+    const first = agent.sign('ingest', 'body');
     clock += 60_000;
-    const second = agent.sign('body');
+    const second = agent.sign('ingest', 'body');
     expect(second.ts).not.toBe(first.ts);
     expect(second.sig).not.toBe(first.sig);
   });
 
+  test('the same payload signed for another purpose gives another signature', () => {
+    // One secret signs metrics pushes, config fetches, result batches and the
+    // tunnel handshake. Without the kind inside the signed bytes, a signature
+    // lifted from one authenticates another whose body happens to match.
+    const { agent } = harness();
+    const ingest = agent.sign('ingest', 'body');
+    const result = agent.sign('result', 'body');
+    expect(ingest.ts).toBe(result.ts);
+    expect(ingest.sig).not.toBe(result.sig);
+  });
+
   test('a different payload gives a different signature', () => {
     const { agent } = harness();
-    expect(agent.sign('one').sig).not.toBe(agent.sign('two').sig);
+    expect(agent.sign('ingest', 'one').sig).not.toBe(agent.sign('ingest', 'two').sig);
   });
 
   test('a different secret gives a different signature', () => {
-    const mine = harness().agent.sign('body');
-    const theirs = harness({ cfg: config({ secret: 'someone-elses-secret' }) }).agent.sign('body');
+    const mine = harness().agent.sign('ingest', 'body');
+    const theirs = harness({ cfg: config({ secret: 'someone-elses-secret' }) }).agent.sign(
+      'ingest',
+      'body',
+    );
     expect(theirs.sig).not.toBe(mine.sig);
   });
 
   test('the shape is the seconds timestamp and hex digest the API verifies', () => {
-    const { ts, sig } = harness().agent.sign('body');
+    const { ts, sig } = harness().agent.sign('ingest', 'body');
     expect(ts).toMatch(/^\d{10}$/);
     expect(sig).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -211,7 +228,7 @@ describe('config sync', () => {
     expect(h.sent[0]?.url).toBe(`${API}/agent/config/${SERVER_ID}`);
     const headers = h.headersOf(0);
     const ts = headers['x-servor-timestamp'] ?? '';
-    expect(headers['x-servor-signature']).toBe(hmac(SECRET, ts, `config:${SERVER_ID}`));
+    expect(headers['x-servor-signature']).toBe(hmac(SECRET, ts, 'config', `config:${SERVER_ID}`));
   });
 
   test('a response dropping an operator revokes that key', async () => {
@@ -372,7 +389,7 @@ describe('metrics push', () => {
     const headers = h.headersOf(0);
     expect(headers['content-type']).toBe('application/json');
     const ts = headers['x-servor-timestamp'] ?? '';
-    expect(headers['x-servor-signature']).toBe(hmac(SECRET, ts, h.bodyOf(0)));
+    expect(headers['x-servor-signature']).toBe(hmac(SECRET, ts, 'ingest', h.bodyOf(0)));
     expect(JSON.parse(h.bodyOf(0)).agentVersion).toBe(BUILD_VERSION);
   });
 
@@ -396,7 +413,7 @@ describe('check results push', () => {
 
     const headers = h.headersOf(0);
     const ts = headers['x-servor-timestamp'] ?? '';
-    expect(headers['x-servor-signature']).toBe(hmac(SECRET, ts, h.bodyOf(0)));
+    expect(headers['x-servor-signature']).toBe(hmac(SECRET, ts, 'result', h.bodyOf(0)));
     expect(JSON.parse(h.bodyOf(0)).results).toHaveLength(2);
   });
 
