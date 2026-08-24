@@ -18,8 +18,11 @@ export const COMMAND_BLACKLIST_PATTERNS: { pattern: RegExp; reason: string }[] =
     reason: 'mkfs on raw device',
   },
   { pattern: /:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/, reason: 'fork bomb' },
+  // No \b before the redirect: a word boundary cannot exist between a space and
+  // `>`, so `\b>` only ever matched `x>/etc/passwd` — the spaced form everyone
+  // actually types walked straight through.
   {
-    pattern: /\b(>|>>)\s*\/etc\/(passwd|shadow|sudoers|gshadow)\b/i,
+    pattern: />>?\s*\/etc\/(?:passwd|shadow|sudoers|gshadow)\b/i,
     reason: 'overwrite /etc/passwd|shadow|sudoers',
   },
   {
@@ -32,7 +35,7 @@ export const COMMAND_BLACKLIST_PATTERNS: { pattern: RegExp; reason: string }[] =
     pattern: /\b(curl|wget)\s+[^|]*\|\s*(sudo\s+)?(bash|sh|zsh|dash)\b/i,
     reason: 'curl | bash from untrusted',
   },
-  { pattern: /\b>\s*\/dev\/(sd|nvme|hd|vd|xvd|mmcblk)/i, reason: 'redirect to raw device' },
+  { pattern: />\s*\/dev\/(?:sd|nvme|hd|vd|xvd|mmcblk)/i, reason: 'redirect to raw device' },
   { pattern: /\bcryptsetup\s+(luksFormat|erase)\b/i, reason: 'cryptsetup destructive' },
   {
     pattern: /\b(parted|fdisk|gdisk)\s+.*\b(mklabel|mktable|wipe)\b/i,
