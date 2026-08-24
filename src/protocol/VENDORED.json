@@ -13,6 +13,6 @@
   },
   "command-blacklist.ts": {
     "source": "packages/shared/src/constants/command-blacklist.ts",
-    "sha256": "e2c1fb703601b66d2455e79511d63907412cb8489dae351409c640a61cbc1df4"
+    "sha256": "972d5b78b8de5c0b6f56db9cbc388b223b61c770cc54a39433f9c86533f109e5"
   }
 }
