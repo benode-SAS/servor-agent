@@ -120,6 +120,16 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   verifier = grants;
   let ws: WebSocket | null = null;
   let backoff = 1000;
+  /**
+   * The last refusal the API gave, so a loop prints one line and not one a
+   * second.
+   *
+   * @remarks
+   * A tunnel that cannot authenticate retries for ever. Logging every attempt
+   * would fill the journal with the same sentence — which is both useless and,
+   * on a small server, expensive.
+   */
+  let lastRefusal: string | null = null;
   const shells = new Map<string, Shell>();
   let inflightExec = 0;
   let online = false;
@@ -351,6 +361,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
       if (!msg) return;
       if (msg.type === 'init.ok') {
         backoff = 1000;
+        lastRefusal = null;
         online = true;
         if (graceTimer) {
           clearTimeout(graceTimer);
@@ -373,7 +384,16 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         return;
       }
       if (msg.type === 'init.error') {
-        console.error('tunnel auth rejected');
+        const reason = typeof msg.reason === 'string' ? msg.reason : 'unknown';
+        if (reason !== lastRefusal) {
+          lastRefusal = reason;
+          console.error(
+            `tunnel auth rejected: ${reason}`,
+            reason === 'clock_skew'
+              ? '(the clock on this host is more than 5 minutes off — check NTP)'
+              : '',
+          );
+        }
         return;
       }
       handle(msg);
@@ -401,7 +421,12 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         }, OFFLINE_GRACE_MS);
       }
       setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, 60000);
+      // Ten seconds, not sixty. This is the channel every command travels down,
+      // and the minute-long gap it used to reach meant a freshly installed
+      // agent stayed unreachable long after whatever refused it had cleared —
+      // usually a clock that had since synced. A retry costs a WebSocket
+      // handshake; being unreachable costs the product.
+      backoff = Math.min(backoff * 2, 10000);
     };
     ws.onerror = () => ws?.close();
   };
