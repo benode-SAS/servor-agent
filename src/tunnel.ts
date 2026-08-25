@@ -134,6 +134,37 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   let inflightExec = 0;
   let online = false;
   let graceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Heartbeat. The tunnel is idle between commands, and an idle WebSocket is
+  // exactly what a proxy or the server's own idle timeout reaps — after which a
+  // half-open socket can sit here looking alive until TCP keepalive notices,
+  // which on Linux defaults to two hours. A ping every 25s keeps the connection
+  // busy so nothing reaps it, and a missing pong past 60s proves the peer is
+  // gone long before the kernel would.
+  let heartbeat: ReturnType<typeof setTimeout> | null = null;
+  let lastPong = 0;
+  const PING_INTERVAL_MS = 25_000;
+  const PONG_DEADLINE_MS = 60_000;
+  const stopHeartbeat = () => {
+    if (heartbeat) {
+      clearTimeout(heartbeat);
+      heartbeat = null;
+    }
+  };
+  // Chained timeout rather than setInterval, like the reconnect below: one
+  // pending timer, cleared cleanly on close, and no tick pile-up if a send ever
+  // blocks.
+  const scheduleHeartbeat = () => {
+    heartbeat = setTimeout(() => {
+      if (!online) return;
+      if (Date.now() - lastPong > PONG_DEADLINE_MS) {
+        console.error('tunnel heartbeat timed out — reconnecting');
+        ws?.close();
+        return;
+      }
+      send({ type: 'ping' });
+      scheduleHeartbeat();
+    }, PING_INTERVAL_MS);
+  };
   const OFFLINE_GRACE_MS = 10 * 60 * 1000; // keep shells alive this long across a tunnel outage (API restart)
   const OFFLINE_BUF_MAX = 256_000;
 
@@ -381,6 +412,13 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
           }
         }
         console.log('tunnel authenticated');
+        lastPong = Date.now();
+        stopHeartbeat();
+        scheduleHeartbeat();
+        return;
+      }
+      if (msg.type === 'pong') {
+        lastPong = Date.now();
         return;
       }
       if (msg.type === 'init.error') {
@@ -401,6 +439,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
     ws.onclose = () => {
       online = false;
       ws = null;
+      stopHeartbeat();
       // Do NOT kill shells: a Servor API restart / network blip must not stop
       // running commands. Keep them alive (buffering output) and reclaim only if
       // the tunnel stays down past the grace window.
