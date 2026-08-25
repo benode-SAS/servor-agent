@@ -251,6 +251,31 @@ describe('handshake', () => {
     socket().deliver({ type: 'init.error' });
     expect(socket().of('resume')).toEqual([]);
   });
+
+  test('the refusal names its reason, and says it once', () => {
+    // A tunnel that cannot authenticate retries for ever. Printing the same
+    // sentence on every attempt fills the journal with nothing — and on a small
+    // server the journal is disk someone is paying for.
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { socket } = open();
+      socket().accept();
+      socket().deliver({ type: 'init.error', reason: 'clock_skew' });
+      socket().deliver({ type: 'init.error', reason: 'clock_skew' });
+      socket().deliver({ type: 'init.error', reason: 'clock_skew' });
+
+      const said = errors.mock.calls.map((c) => String(c[0]));
+      expect(said.filter((line) => line.includes('clock_skew'))).toHaveLength(1);
+
+      // A different reason is news, and is printed.
+      socket().deliver({ type: 'init.error', reason: 'unknown_agent' });
+      expect(
+        errors.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('unknown_agent')),
+      ).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+  });
 });
 
 describe('exec authorization', () => {
@@ -573,7 +598,10 @@ describe('outage buffering', () => {
 });
 
 describe('reconnection', () => {
-  test('the delay doubles on every failed attempt, up to a minute', () => {
+  test('the delay doubles on every failed attempt, up to ten seconds', () => {
+    // Ten, not sixty. This is the channel every command travels down, and a
+    // minute-long gap left a freshly installed agent unreachable long after
+    // whatever refused it had cleared — usually a clock that had since synced.
     const { socket } = open();
     const delays: number[] = [];
     for (let i = 0; i < 8; i++) {
@@ -581,7 +609,7 @@ describe('reconnection', () => {
       delays.push(scheduled[scheduled.length - 1]?.ms ?? 0);
       fire();
     }
-    expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 32000, 60000, 60000]);
+    expect(delays).toEqual([1000, 2000, 4000, 8000, 10000, 10000, 10000, 10000]);
   });
 
   test('a successful handshake resets the delay', () => {
