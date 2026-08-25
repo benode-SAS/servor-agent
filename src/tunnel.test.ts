@@ -362,14 +362,16 @@ describe('exec execution', () => {
     const { socket } = online();
     socket().deliver(signed('exec', 'sleep 3600', { timeoutMs: 3_600_000 }));
 
-    expect(scheduled.map((s) => s.ms)).toEqual([600_000]);
+    // The 25s heartbeat tick is scheduled at handshake; this asserts the exec's
+    // own deadline, not that.
+    expect(scheduled.map((s) => s.ms).filter((ms) => ms !== 25_000)).toEqual([600_000]);
   });
 
   test('a request with no deadline gets the five minute default', () => {
     const { socket } = online();
     socket().deliver(signed('exec', 'uptime'));
 
-    expect(scheduled.map((s) => s.ms)).toEqual([300_000]);
+    expect(scheduled.map((s) => s.ms).filter((ms) => ms !== 25_000)).toEqual([300_000]);
   });
 
   test('a command that outlives its deadline is killed', () => {
@@ -681,5 +683,35 @@ describe('outage grace window', () => {
 
     expect(procs[0]?.kills()).toBe(0);
     expect(tunnel.isBusy()).toBe(true);
+  });
+});
+
+describe('heartbeat keeps the tunnel from silently dying', () => {
+  test('once up, it pings on each heartbeat tick', () => {
+    const { socket } = online();
+    fire(25_000);
+    expect(socket().of('ping')).toHaveLength(1);
+  });
+
+  test('a pong resets the deadline — the tunnel stays open', () => {
+    const { socket } = online();
+    fire(25_000);
+    socket().deliver({ type: 'pong' });
+    fire(25_000);
+    expect(socket().of('ping')).toHaveLength(2);
+    expect(socket().readyState).not.toBe(3);
+  });
+
+  test('no pong past the deadline tears the socket down so onclose reconnects', () => {
+    const now = spyOn(Date, 'now');
+    try {
+      now.mockReturnValue(1_000_000);
+      const { socket } = online(); // lastPong stamped at 1_000_000
+      now.mockReturnValue(1_000_000 + 61_000); // past the 60s deadline
+      fire(25_000);
+      expect(socket().readyState).toBe(3); // closed → onclose schedules reconnect
+    } finally {
+      now.mockRestore();
+    }
   });
 });
