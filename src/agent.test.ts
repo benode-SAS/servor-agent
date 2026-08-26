@@ -98,7 +98,7 @@ const harness = (opts: HarnessOptions = {}) => {
     },
     startTunnel: (c) => {
       tunnels.push(c);
-      return { isBusy: opts.busy ?? (() => false) };
+      return { isBusy: opts.busy ?? (() => false), reconnectNow: () => {} };
     },
     setExecPolicy: (keys) => policies.push(keys),
     saveConfig: (patch) => saved.push(patch),

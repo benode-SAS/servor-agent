@@ -142,6 +142,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   // gone long before the kernel would.
   let heartbeat: ReturnType<typeof setTimeout> | null = null;
   let lastPong = 0;
+  let connectedAt = 0;
   const PING_INTERVAL_MS = 25_000;
   const PONG_DEADLINE_MS = 60_000;
   const stopHeartbeat = () => {
@@ -421,6 +422,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         }
         console.log('tunnel authenticated');
         lastPong = Date.now();
+        connectedAt = Date.now();
         stopHeartbeat();
         scheduleHeartbeat();
         return;
@@ -480,5 +482,21 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
 
   connect();
 
-  return { isBusy: () => shells.size > 0 || inflightExec > 0 };
+  // Force a reconnect when the control plane reports, over the HTTP config
+  // poll, that it holds no tunnel for us while we still believe we are online —
+  // the half-open case the config loop can see even when the socket cannot. The
+  // 30s floor since the last connect avoids flapping on a response that was
+  // computed before a fresh reconnect had registered.
+  const reconnectNow = () => {
+    if (!online || !ws) return;
+    if (Date.now() - connectedAt < 30_000) return;
+    console.error('control plane reports no tunnel — reconnecting');
+    try {
+      ws.close();
+    } catch {
+      // onclose will schedule the reconnect regardless
+    }
+  };
+
+  return { isBusy: () => shells.size > 0 || inflightExec > 0, reconnectNow };
 };

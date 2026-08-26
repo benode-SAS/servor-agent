@@ -40,7 +40,7 @@ export type AgentDeps = {
   collect: typeof defaultCollect;
   runCheck: typeof defaultRunCheck;
   stageUpdate: typeof defaultStageUpdate;
-  startTunnel: (cfg: AgentConfig) => { isBusy: () => boolean };
+  startTunnel: (cfg: AgentConfig) => { isBusy: () => boolean; reconnectNow: () => void };
   setExecPolicy: typeof defaultSetExecPolicy;
   saveConfig: typeof defaultSaveConfig;
   /** How the process ends; exiting is the whole of the restart mechanism. */
@@ -124,6 +124,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
   let updateStaged = false;
   /** Replaced by the tunnel's own predicate once it starts; `push` mode is never busy. */
   let tunnelBusy: () => boolean = () => false;
+  let tunnelReconnect: () => void = () => {};
 
   /**
    * Stage a verified update if one exists, and restart only once the agent is idle.
@@ -220,6 +221,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
         version?: string;
         requireSignedExec?: boolean;
         authorizedExecKeys?: Array<{ userId: string; pubkey: string }>;
+        tunnelConnected?: boolean;
       };
 
       // `requireSignedExec` is deliberately ignored: signing is pinned on in the
@@ -242,6 +244,11 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
         }
       }
       if (updateStaged || (data.version && data.version !== BUILD_VERSION)) void maybeApplyUpdate();
+      // The config poll runs over HTTP, which keeps working when the tunnel has
+      // died silently. If the control plane says it holds no tunnel for us,
+      // reconnect — bounding a half-open tunnel to one poll interval (~30s)
+      // instead of waiting on the heartbeat or the kernel.
+      if (data.tunnelConnected === false) tunnelReconnect();
     } catch (e) {
       console.error('config fetch failed', (e as Error).message);
     }
@@ -322,6 +329,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     if (cfg.mode === 'tunnel') {
       const tunnel = startTunnel(cfg);
       tunnelBusy = tunnel.isBusy;
+      tunnelReconnect = tunnel.reconnectNow;
     }
 
     void maybeApplyUpdate();
