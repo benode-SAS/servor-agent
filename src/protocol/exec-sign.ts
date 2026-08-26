@@ -1,11 +1,3 @@
-// Vendored from packages/shared/src/crypto/exec-sign.ts — do not edit here.
-//
-// The agent ships as an independent, auditable artefact: a reader must be
-// able to see every line that decides whether a command runs, without
-// resolving a private Servor package. `bun run protocol:check` fails if this
-// copy drifts from the original, because a guard that disagrees with the one
-// on the control plane is worse than no guard.
-
 import { ed25519 } from '@noble/curves/ed25519';
 import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -34,6 +26,15 @@ export type ExecGrant = {
 // signing identity (so any unlocked session reproduces it; nothing to store).
 const deriveExecSeed = (vaultPrivkey: Uint8Array): Uint8Array =>
   hkdf(sha256, vaultPrivkey, new Uint8Array(0), EXEC_KDF_INFO, 32);
+
+/**
+ * The exec-signing seed on its own — the ONLY material a client needs to sign
+ * grants after the initial unlock. Unlike the X25519 vault private key it is
+ * derived from, this seed cannot unwrap DEKs or decrypt any credential; it only
+ * signs exec grants. Callers own the returned buffer and must wipe it.
+ */
+export const execSeedFromVault = (vaultPrivkey: Uint8Array): Uint8Array =>
+  deriveExecSeed(vaultPrivkey);
 
 const u32 = (n: number): Uint8Array => {
   const b = new Uint8Array(4);
@@ -70,11 +71,19 @@ export const execPublicKeyFromVault = (vaultPrivkey: Uint8Array): Uint8Array => 
   }
 };
 
+/**
+ * Sign an exec/shell grant with a pre-derived exec seed (see
+ * {@link execSeedFromVault}). Does NOT wipe the seed — the caller keeps it for
+ * the session.
+ */
+export const signWithExecSeed = (seed: Uint8Array, grant: ExecGrant): Uint8Array =>
+  ed25519.sign(canonicalExecMessage(grant), seed);
+
 /** Sign an exec/shell grant with the vault-derived key (browser-side). */
 export const signExecGrant = (vaultPrivkey: Uint8Array, grant: ExecGrant): Uint8Array => {
   const seed = deriveExecSeed(vaultPrivkey);
   try {
-    return ed25519.sign(canonicalExecMessage(grant), seed);
+    return signWithExecSeed(seed, grant);
   } finally {
     wipe(seed);
   }

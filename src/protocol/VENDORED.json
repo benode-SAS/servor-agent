@@ -1,7 +1,7 @@
 {
   "exec-sign.ts": {
     "source": "packages/shared/src/crypto/exec-sign.ts",
-    "sha256": "23bcbc04d12a3f2356ca79ee4baa4a84ffe0277fb31a9a94a913cd3ea3f7135e"
+    "sha256": "a45953e3c1013c8e0e86bb28c0d88c75ba737d59636290ea28181440e9e58cab"
   },
   "wipe.ts": {
     "source": "packages/shared/src/crypto/wipe.ts",
