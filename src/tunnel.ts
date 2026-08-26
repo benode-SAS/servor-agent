@@ -319,6 +319,14 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         // Bind the grant to the exact shell command (live-exec runs a real command
         // via a PTY; a generic terminal opens 'bash -l').
         if (!grants.verify('shell', shellCommand, msg)) {
+          // Say why, in the terminal itself. A bare exit shows only "session
+          // ended" — the silent refusal that makes a signing or key-mismatch
+          // problem impossible to tell from a dead tunnel.
+          send({
+            type: 'shell.data',
+            id,
+            data: '\r\n\x1b[31mExec refused: no valid vault signature for this server.\x1b[0m\r\n\x1b[2mUnlock the vault in your browser; if it stays refused, the authorized key no longer matches this vault.\x1b[0m\r\n',
+          });
           send({ type: 'shell.exit', id, code: 126 });
           return;
         }

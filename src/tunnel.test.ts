@@ -392,6 +392,17 @@ describe('interactive sessions', () => {
     expect(spawns).toEqual([]);
   });
 
+  test('a refused session explains itself in the terminal before it exits', () => {
+    // The whole point: a silent 126 shows the user only "session ended" and
+    // hides a signing/key problem behind what looks like a dead tunnel.
+    const { socket } = online();
+    socket().deliver({ type: 'shell.open', id: 'sh-1', command: 'bash -l' });
+
+    const data = socket().of('shell.data')[0];
+    expect(String(data?.data)).toContain('Exec refused');
+    expect(spawns).toEqual([]);
+  });
+
   test('an exec grant cannot be reused to open a session', () => {
     const { socket } = online();
     socket().deliver({ ...signed('exec', 'bash -l'), type: 'shell.open', id: 'sh-1' });
