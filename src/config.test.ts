@@ -7,7 +7,7 @@ import { configPath, loadConfig, saveConfig } from './config';
 const valid = {
   serverId: '019ecd37-5979-72ce-8960-fc9454880973',
   secret: 'enrollment-secret',
-  apiUrl: 'https://api.servor.benode.fr',
+  apiUrl: 'https://api.servor.app',
 };
 
 let dir: string;
@@ -36,8 +36,8 @@ describe('config', () => {
   });
 
   test('a trailing slash is stripped from apiUrl', () => {
-    write({ ...valid, apiUrl: 'https://api.servor.benode.fr/' });
-    expect(loadConfig().apiUrl).toBe('https://api.servor.benode.fr');
+    write({ ...valid, apiUrl: 'https://api.servor.app/' });
+    expect(loadConfig().apiUrl).toBe('https://api.servor.app');
   });
 
   test('a missing interval defaults to 60 seconds', () => {

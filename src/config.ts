@@ -15,7 +15,7 @@ export type AgentConfig = {
   serverId: string;
   /** Per-server HMAC key proving outbound requests come from this agent. */
   secret: string;
-  /** HTTPS base of the control plane, e.g. https://api.servor.benode.fr. */
+  /** HTTPS base of the control plane, e.g. https://api.servor.app. */
   apiUrl: string;
   /** Delay between two metrics pushes; the control plane may retune it. */
   intervalSeconds: number;

@@ -7,7 +7,7 @@ import { platformKey, stageUpdate } from './updater';
 const cfg: AgentConfig = {
   serverId: '019ecd37-5979-72ce-8960-fc9454880973',
   secret: 'enrollment-secret',
-  apiUrl: 'https://api.servor.benode.fr',
+  apiUrl: 'https://api.servor.app',
   intervalSeconds: 60,
   mode: 'tunnel',
   version: '1',

@@ -21,7 +21,7 @@ already run.
 
 ---
 
-A single compiled binary that connects out to [Servor](https://servor.benode.fr),
+A single compiled binary that connects out to [Servor](https://servor.app),
 reports what the machine is doing, runs the checks you configured, and executes
 the commands you approve. No port to open, no runtime to install.
 
@@ -52,7 +52,7 @@ One JSON file, mode `0600`:
 {
   "serverId": "uuid of this server",
   "secret": "issued when the server is enrolled",
-  "apiUrl": "https://api.servor.benode.fr",
+  "apiUrl": "https://api.servor.app",
   "intervalSeconds": 60,
   "mode": "tunnel",
   "user": "deploy"
