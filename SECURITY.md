@@ -2,7 +2,7 @@
 
 ## Reporting
 
-Email **contact@benode.fr** with `[security]` in the subject.
+Email **contact@servor.app** with `[security]` in the subject.
 
 Include what you found, how to reproduce it, and what you think it lets an
 attacker do. If you would like a reply in French or English, say so.
