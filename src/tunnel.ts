@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import type { AgentConfig } from './config';
 import { createGrantVerifier, type GrantVerifier } from './grant';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
@@ -28,21 +29,109 @@ export const setExecPolicy = (keysB64: string[]) => {
 
 const isRoot = () => typeof process.getuid === 'function' && process.getuid() === 0;
 
+// Directories a login shell would normally provide but a systemd-launched agent
+// often lacks — sbin dirs in particular vanish for non-root, and snap is common.
+const STD_PATH_DIRS = [
+  '/usr/local/sbin',
+  '/usr/local/bin',
+  '/usr/sbin',
+  '/usr/bin',
+  '/sbin',
+  '/bin',
+  '/snap/bin',
+];
+
+const homeFor = (cfg: AgentConfig): string => {
+  if (process.platform === 'win32') return process.env.USERPROFILE ?? '';
+  if (cfg.user && cfg.user !== 'root') return `/home/${cfg.user}`;
+  if (cfg.user === 'root') return '/root';
+  return process.env.HOME ?? (isRoot() ? '/root' : '');
+};
+
+const compareNodeVersionsDesc = (a: string, b: string): number => {
+  const parse = (s: string) =>
+    s
+      .replace(/^v/, '')
+      .split('.')
+      .map((n) => Number.parseInt(n, 10) || 0);
+  const [a1 = 0, a2 = 0, a3 = 0] = parse(a);
+  const [b1 = 0, b2 = 0, b3 = 0] = parse(b);
+  return b1 - a1 || b2 - a2 || b3 - a3;
+};
+
+// nvm installs node under ~/.nvm/versions/node/<v>/bin and only exports it from
+// ~/.bashrc — which a non-interactive login shell never sources. Resolve the
+// default (or newest) version's bin directly so `node`/`npm` are found.
+const nvmNodeBin = (home: string): string[] => {
+  try {
+    const base = `${home}/.nvm/versions/node`;
+    if (!existsSync(base)) return [];
+    let chosen: string | null = null;
+    try {
+      const def = readFileSync(`${home}/.nvm/alias/default`, 'utf8').trim();
+      if (def && existsSync(`${base}/${def}/bin`)) chosen = def;
+    } catch {
+      // no default alias — fall through to newest installed
+    }
+    if (!chosen) {
+      const versions = readdirSync(base)
+        .filter((v) => existsSync(`${base}/${v}/bin`))
+        .sort(compareNodeVersionsDesc);
+      chosen = versions[0] ?? null;
+    }
+    return chosen ? [`${base}/${chosen}/bin`] : [];
+  } catch {
+    return [];
+  }
+};
+
+/**
+ * Compute a usable PATH for one-shot commands.
+ *
+ * @remarks
+ * A one-shot `bash -lc` is a login but NON-interactive shell: it sources
+ * `/etc/profile` (which overwrites PATH) but never `~/.bashrc`, so nvm and most
+ * per-user tool shims are invisible, and `/etc/profile` itself strips sbin for
+ * non-root. We therefore run the command under a plain `bash -c` (no login, so
+ * nothing resets PATH) and hand it a PATH we build here: the agent's inherited
+ * PATH, the standard system dirs, the user's common bin dirs, and their nvm
+ * node. This is env, not the signed command, so the signature still holds.
+ */
+const buildExecPath = (cfg: AgentConfig): string => {
+  if (process.platform === 'win32') return process.env.PATH ?? '';
+  const home = homeFor(cfg);
+  const userDirs = home
+    ? [
+        `${home}/.local/bin`,
+        `${home}/bin`,
+        `${home}/.bun/bin`,
+        `${home}/.deno/bin`,
+        `${home}/.cargo/bin`,
+        `${home}/go/bin`,
+        ...nvmNodeBin(home),
+      ]
+    : [];
+  const inherited = (process.env.PATH ?? '').split(':');
+  return [...new Set([...userDirs, ...STD_PATH_DIRS, ...inherited].filter(Boolean))].join(':');
+};
+
 /**
  * Build the argv for a one-shot command, dropping root when a user is configured.
  *
  * @remarks
- * Wrapping is limited to choosing the interpreter and the account. Nothing is
- * prepended to the command itself — no `cd`, no `sudo`, no exported variable —
- * because the operator signed exactly this string and the signature must keep
- * covering what actually executes.
+ * Wrapping is limited to choosing the interpreter, the account and the PATH.
+ * Nothing is prepended to the command itself — no `cd`, no `sudo`, no exported
+ * variable — because the operator signed exactly this string and the signature
+ * must keep covering what actually executes. PATH is forced via a leading `env`
+ * so `runuser`/`/etc/profile` cannot strip it back to a stripped default.
  */
-const wrapExec = (cfg: AgentConfig, command: string): string[] => {
+const wrapExec = (cfg: AgentConfig, command: string, execPath: string): string[] => {
   if (process.platform === 'win32') return ['powershell', '-NoProfile', '-Command', command];
+  const inner = ['env', `PATH=${execPath}`, 'bash', '-c', command];
   if (process.platform === 'linux' && cfg.user && isRoot()) {
-    return ['runuser', '-u', cfg.user, '--', 'bash', '-lc', command];
+    return ['runuser', '-u', cfg.user, '--', ...inner];
   }
-  return ['bash', '-lc', command];
+  return inner;
 };
 
 /**
@@ -118,6 +207,9 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   const grants = createGrantVerifier({ serverId: cfg.serverId });
   grants.setKeys(execKeysB64);
   verifier = grants;
+  // Resolved once: the fs lookups are cheap and the answer does not change over
+  // the agent's lifetime (a new nvm install is picked up on the next restart).
+  const execPath = buildExecPath(cfg);
   let ws: WebSocket | null = null;
   let backoff = 1000;
   /**
@@ -213,7 +305,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
     const start = Date.now();
     inflightExec++;
     try {
-      const proc = spawn(wrapExec(cfg, command), { stdout: 'pipe', stderr: 'pipe' });
+      const proc = spawn(wrapExec(cfg, command, execPath), { stdout: 'pipe', stderr: 'pipe' });
       const timer = setTimeout(() => proc.kill(), Math.min(timeoutMs || 300000, 600000));
       const [stdout, stderr] = await Promise.all([
         new Response(proc.stdout).text(),

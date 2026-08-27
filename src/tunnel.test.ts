@@ -348,6 +348,23 @@ describe('exec execution', () => {
     expect(spawns[0]).toContain(command);
   });
 
+  test('a one-shot command runs under a shell with an explicit forced PATH (posix)', () => {
+    if (process.platform === 'win32') return; // powershell path does not force PATH
+    const { socket } = online();
+    socket().deliver(signed('exec', 'node -v'));
+
+    const argv = spawns[0] ?? [];
+    expect(argv).toContain('bash');
+    expect(argv).toContain('-c');
+    // PATH is forced via a leading `env PATH=…`, and it must include the sbin dirs
+    // a stripped login shell drops.
+    const pathArg = argv.find((a) => a.startsWith('PATH='));
+    expect(pathArg).toBeDefined();
+    expect(pathArg).toContain('/usr/sbin');
+    // the signed command is still the final argument, untouched
+    expect(argv[argv.length - 1]).toBe('node -v');
+  });
+
   test('a spawn that throws is answered rather than left hanging', () => {
     spawnThrows = true;
     const { socket } = online();
