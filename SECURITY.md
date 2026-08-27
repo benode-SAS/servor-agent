@@ -2,7 +2,7 @@
 
 ## Reporting
 
-Email **contact@servor.app** with `[security]` in the subject.
+Email **hello@servor.app** with `[security]` in the subject.
 
 Include what you found, how to reproduce it, and what you think it lets an
 attacker do. If you would like a reply in French or English, say so.
