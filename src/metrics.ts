@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { getFacts } from './facts';
 
 /**
  * One metrics sample as sent to the control plane.
@@ -22,6 +23,7 @@ export type Payload = {
   collectedAt?: string;
   specs: Record<string, unknown>;
   metrics: Record<string, unknown>;
+  facts?: Record<string, unknown>;
 };
 
 /** Run a command and return its trimmed stdout, or `''` if it fails at all. */
@@ -338,6 +340,7 @@ const collectLinux = async (version: string): Promise<Payload> => {
       disks,
       topProcesses,
     },
+    facts: getFacts(),
   };
 };
 
