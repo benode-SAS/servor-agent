@@ -9,4 +9,4 @@
  * only after the binaries exist, so the API can never advertise a version for
  * which no binary was built.
  */
-export const BUILD_VERSION = '1.0.16';
+export const BUILD_VERSION = '1.0.17';
