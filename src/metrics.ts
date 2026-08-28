@@ -248,6 +248,29 @@ export const parseOsRelease = (raw: string): Map<string, string> => {
  * (tmpfs, devtmpfs, overlay, squashfs) from disk totals, so the numbers
  * describe real hardware rather than the kernel's bookkeeping.
  */
+type ListeningPort = { port: number; proto?: 'tcp' | 'udp'; process?: string; address?: string };
+
+// Parse `ss -tulnpH` (tcp+udp, listening, numeric, no header, with process).
+// Columns: Netid State Recv-Q Send-Q Local:Port Peer:Port [users:(("proc",…))].
+const parseListeningPorts = (raw: string): ListeningPort[] => {
+  const byKey = new Map<string, ListeningPort>();
+  for (const line of raw.split('\n')) {
+    const f = line.trim().split(/\s+/);
+    if (f.length < 5) continue;
+    const proto = f[0] === 'tcp' ? 'tcp' : f[0] === 'udp' ? 'udp' : undefined;
+    const local = f[4] ?? '';
+    const m = local.match(/:(\d+)$/);
+    if (!m?.[1]) continue;
+    const port = Number.parseInt(m[1], 10);
+    if (!Number.isFinite(port)) continue;
+    const address = local.slice(0, local.length - m[0].length) || undefined;
+    const proc = line.match(/users:\(\("([^"]+)"/)?.[1];
+    const key = `${proto ?? ''}:${port}`;
+    if (!byKey.has(key)) byKey.set(key, { port, proto, address, process: proc });
+  }
+  return [...byKey.values()].sort((a, b) => a.port - b.port).slice(0, 200);
+};
+
 const collectLinux = async (version: string): Promise<Payload> => {
   const s1 = parseCpuLines(readProc('/proc/stat'));
   await sleep(1000);
@@ -293,6 +316,7 @@ const collectLinux = async (version: string): Promise<Payload> => {
         ?.trim(),
       ramTotalMb: Math.round(memTotal / 1024),
       diskTotalGb: Math.round(diskTotalGb * 100) / 100,
+      listeningPorts: parseListeningPorts(sh(['ss', '-tulnpH'])),
     },
     metrics: {
       cpuPercent,
@@ -386,8 +410,9 @@ $cores=(Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfLogic
 $disks=@(); $dt=0.0; $du=0.0
 foreach($d in Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3"){ $tg=[math]::Round($d.Size/1GB,2); $ug=[math]::Round(($d.Size-$d.FreeSpace)/1GB,2); $pct=if($d.Size-gt0){[math]::Round((($d.Size-$d.FreeSpace)/$d.Size)*100,1)}else{0}; $disks+=@{mount=$d.DeviceID;totalGb=$tg;usedGb=$ug;usedPct=$pct}; $dt+=$tg; $du+=$ug }
 $cpus=@(); try { Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor | Where-Object {$_.Name -ne '_Total'} | ForEach-Object { $cpus+=@{core=[int]$_.Name;percent=[double]$_.PercentProcessorTime} } } catch {}
+$ports=@(); try { Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Group-Object LocalPort | Select-Object -First 200 | ForEach-Object { $c=$_.Group[0]; $pn=''; try{$pn=(Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue).ProcessName}catch{}; $ports+=@{port=[int]$c.LocalPort;proto='tcp';address=[string]$c.LocalAddress;process=$pn} } } catch {}
 @{ v=1; agentVersion="__V__"; os="windows"; hostname=$env:COMPUTERNAME; collectedAt=(Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ");
-  specs=@{ osFamily="windows"; osDistro=$o.Caption; osVersion=$o.Version; kernelVersion=$o.BuildNumber; architecture=$env:PROCESSOR_ARCHITECTURE; cpuCount=[int]$cores; ramTotalMb=[int][math]::Round($o.TotalVisibleMemorySize/1024); diskTotalGb=$dt };
+  specs=@{ osFamily="windows"; osDistro=$o.Caption; osVersion=$o.Version; kernelVersion=$o.BuildNumber; architecture=$env:PROCESSOR_ARCHITECTURE; cpuCount=[int]$cores; ramTotalMb=[int][math]::Round($o.TotalVisibleMemorySize/1024); diskTotalGb=$dt; listeningPorts=$ports };
   metrics=@{ cpuPercent=[double]$cpu; ramUsedMb=[int][math]::Round(($o.TotalVisibleMemorySize-$o.FreePhysicalMemory)/1024); ramFreeMb=[int][math]::Round($o.FreePhysicalMemory/1024); swapTotalMb=[int][math]::Round($o.TotalVirtualMemorySize/1024); swapUsedMb=[int][math]::Round(($o.TotalVirtualMemorySize-$o.FreeVirtualMemory)/1024); diskTotalGb=$dt; diskUsedGb=$du; uptimeSeconds=[int]((Get-Date)-$o.LastBootUpTime).TotalSeconds; procCount=(Get-Process).Count; cpus=$cpus; disks=$disks }
 } | ConvertTo-Json -Depth 6 -Compress
 `;
