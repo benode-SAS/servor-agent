@@ -379,16 +379,20 @@ describe('exec execution', () => {
     const { socket } = online();
     socket().deliver(signed('exec', 'sleep 3600', { timeoutMs: 3_600_000 }));
 
-    // The 25s heartbeat tick is scheduled at handshake; this asserts the exec's
-    // own deadline, not that.
-    expect(scheduled.map((s) => s.ms).filter((ms) => ms !== 25_000)).toEqual([600_000]);
+    // The 25s heartbeat and 60s stability timers are scheduled at handshake; this
+    // asserts the exec's own deadline, not those.
+    expect(scheduled.map((s) => s.ms).filter((ms) => ms !== 25_000 && ms !== 60_000)).toEqual([
+      600_000,
+    ]);
   });
 
   test('a request with no deadline gets the five minute default', () => {
     const { socket } = online();
     socket().deliver(signed('exec', 'uptime'));
 
-    expect(scheduled.map((s) => s.ms).filter((ms) => ms !== 25_000)).toEqual([300_000]);
+    expect(scheduled.map((s) => s.ms).filter((ms) => ms !== 25_000 && ms !== 60_000)).toEqual([
+      300_000,
+    ]);
   });
 
   test('a command that outlives its deadline is killed', () => {
@@ -662,6 +666,72 @@ describe('reconnection', () => {
     live.onerror?.();
     expect(live.readyState).toBe(3);
     expect(scheduled[scheduled.length - 1]?.ms).toBe(1000);
+  });
+});
+
+describe('flap breaker', () => {
+  // A connection that authenticates then dies young is a flap — the signature of
+  // two agents sharing one server id, evicting each other on the control plane.
+  const flapOnce = (socket: () => FakeSocket) => {
+    socket().accept();
+    socket().deliver({ type: 'init.ok' });
+    socket().close();
+  };
+
+  test('a run of flaps stretches the reconnect to a long cooldown', () => {
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { socket } = open();
+      let last = 0;
+      for (let i = 0; i < 5; i++) {
+        flapOnce(socket);
+        last = scheduled[scheduled.length - 1]?.ms ?? 0;
+        fire();
+      }
+      // Under the soft limit the fast backoff still applies; at it, the cooldown.
+      expect(last).toBe(5 * 60_000);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  test('past the hard limit it stops reconnecting entirely', () => {
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { socket } = open();
+      for (let i = 0; i < 20; i++) {
+        flapOnce(socket);
+        fire();
+      }
+      // One socket for the initial dial and one per reconnect (closes 1..19);
+      // the 20th close scheduled none, so no further socket is ever opened.
+      expect(sockets.length).toBe(20);
+      expect(errors.mock.calls.some((c) => String(c[0]).includes('stopping reconnects'))).toBe(
+        true,
+      );
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  test('a connection that proves stable clears the flap counter', () => {
+    const errors = spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { socket } = open();
+      for (let i = 0; i < 4; i++) {
+        flapOnce(socket);
+        fire();
+      }
+      // Reconnect, authenticate, and stay up long enough to be judged healthy.
+      socket().accept();
+      socket().deliver({ type: 'init.ok' });
+      fire(60_000); // the stable timer resets the counter
+      socket().close();
+      // Back to the ordinary fast backoff, not the cooldown.
+      expect(scheduled[scheduled.length - 1]?.ms).toBe(1000);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });
 

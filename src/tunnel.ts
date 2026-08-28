@@ -212,6 +212,28 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   const execPath = buildExecPath(cfg);
   let ws: WebSocket | null = null;
   let backoff = 1000;
+  // Flap breaker. Two agents sharing one serverId evict each other on the control
+  // plane (a fresh tunnel closes the previous one), so each reconnects, re-auths,
+  // and evicts the other — a storm that authenticates every couple of seconds
+  // until it trips the server's rate limit, then resumes. We detect it agent-side:
+  // a connection that authenticates but dies before it has been up STABLE_MS is a
+  // flap. A run of flaps first stretches the reconnect to a long cooldown, then
+  // stops reconnecting entirely — the process stays alive (so systemd does not
+  // restart it) but goes silent, ending the storm. A connection that stays up
+  // past STABLE_MS is healthy and resets the counter.
+  let sawInitOk = false;
+  let flapCount = 0;
+  let stableTimer: ReturnType<typeof setTimeout> | null = null;
+  const STABLE_MS = 60_000;
+  const FLAP_SOFT_LIMIT = 5;
+  const FLAP_HARD_LIMIT = 20;
+  const FLAP_COOLDOWN_MS = 5 * 60_000;
+  const clearStableTimer = () => {
+    if (stableTimer) {
+      clearTimeout(stableTimer);
+      stableTimer = null;
+    }
+  };
   /**
    * The last refusal the API gave, so a loop prints one line and not one a
    * second.
@@ -515,6 +537,12 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         console.log('tunnel authenticated');
         lastPong = Date.now();
         connectedAt = Date.now();
+        sawInitOk = true;
+        clearStableTimer();
+        stableTimer = setTimeout(() => {
+          if (flapCount > 0) console.log('tunnel stable — flap counter reset');
+          flapCount = 0;
+        }, STABLE_MS);
         stopHeartbeat();
         scheduleHeartbeat();
         return;
@@ -542,6 +570,12 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
       online = false;
       ws = null;
       stopHeartbeat();
+      clearStableTimer();
+      // A connection that authenticated but died young is a flap; one that never
+      // authenticated is an ordinary connection failure (server down, refused),
+      // already handled by the exponential backoff below.
+      if (sawInitOk && Date.now() - connectedAt < STABLE_MS) flapCount++;
+      sawInitOk = false;
       // Do NOT kill shells: a Servor API restart / network blip must not stop
       // running commands. Keep them alive (buffering output) and reclaim only if
       // the tunnel stays down past the grace window.
@@ -560,6 +594,24 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
           }
           graceTimer = null;
         }, OFFLINE_GRACE_MS);
+      }
+      if (flapCount >= FLAP_HARD_LIMIT) {
+        // Giving up on reconnecting, not exiting: the process stays alive so
+        // systemd (Restart=always) does not immediately relaunch it into the
+        // same storm. It will retry only on a manual restart or reboot.
+        console.error(
+          `tunnel flapped ${flapCount} times — stopping reconnects. Another agent is almost certainly using this server id; reinstall the agent on a single host.`,
+        );
+        return;
+      }
+      if (flapCount >= FLAP_SOFT_LIMIT) {
+        if (flapCount === FLAP_SOFT_LIMIT) {
+          console.error(
+            `tunnel flapping — backing off for ${FLAP_COOLDOWN_MS / 1000}s (a duplicate agent may share this server id)`,
+          );
+        }
+        setTimeout(connect, FLAP_COOLDOWN_MS);
+        return;
       }
       setTimeout(connect, backoff);
       // Ten seconds, not sixty. This is the channel every command travels down,
