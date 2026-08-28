@@ -9,7 +9,7 @@
   },
   "command-guards.ts": {
     "source": "packages/shared/src/utils/command-guards.ts",
-    "sha256": "efd52722c078b34d094871c9592f48c538a91bce87dd9c1ecb639ac7e8259b34"
+    "sha256": "7048d2d29ce097705511ed8b2ac445f4a12d185704a52ebf6589ced61a06a6f5"
   },
   "command-blacklist.ts": {
     "source": "packages/shared/src/constants/command-blacklist.ts",

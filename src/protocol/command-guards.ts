@@ -20,7 +20,7 @@ const SAFE_READ_PATTERNS: RegExp[] = [
   /^(cat|head|tail|less|more|grep|egrep|zgrep|ls|ll|find|stat|file|wc|awk|sed -n|cut|sort|uniq|tr)\b/,
   /^(ps|pgrep|top -bn1|htop -|free|df|du|uptime|vmstat|iostat|lsof|lsblk|mount)\b/,
   /^(whoami|id|hostname|uname|date|env|printenv|pwd|which|type|command -v)\b/,
-  /^(systemctl (status|is-active|is-enabled|list-units|list-unit-files|show|cat)|journalctl)\b/,
+  /^(systemctl\s+(--failed|--all|-a|status|is-active|is-enabled|is-failed|list-units|list-unit-files|list-timers|list-sockets|list-dependencies|list-jobs|show|show-environment|cat|get-default)|journalctl)\b/,
   /^(ss|netstat|ip|dig|host|nslookup|ping -c|traceroute|getent)\b/,
   /^(docker (ps|logs|inspect|images|stats)|podman (ps|logs|inspect)|kubectl (get|describe|logs))\b/,
   /^(curl (--head|-I|-sS|-fsS)|wget --spider|nginx -t|apache2ctl configtest|sshd -t|git status|git log)\b/,

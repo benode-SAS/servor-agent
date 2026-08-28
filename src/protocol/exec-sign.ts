@@ -1,3 +1,11 @@
+// Vendored from packages/shared/src/crypto/exec-sign.ts — do not edit here.
+//
+// The agent ships as an independent, auditable artefact: a reader must be
+// able to see every line that decides whether a command runs, without
+// resolving a private Servor package. `bun run protocol:check` fails if this
+// copy drifts from the original, because a guard that disagrees with the one
+// on the control plane is worse than no guard.
+
 import { ed25519 } from '@noble/curves/ed25519';
 import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
