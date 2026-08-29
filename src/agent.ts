@@ -22,7 +22,15 @@ const CRON_TICK_MS = 30 * 1000;
 /** Per-run deadline for a scheduled command. */
 const CRON_TIMEOUT_MS = 5 * 60 * 1000;
 /** Cap on captured output sent back per run. */
-const CRON_OUTPUT_MAX = 8000;
+const CRON_OUTPUT_MAX = 20000;
+
+/** Keep the last `max` chars, trimmed to a clean line boundary (logs matter at the tail). */
+const tailCap = (s: string, max: number) => {
+  if (s.length <= max) return s;
+  const sliced = s.slice(s.length - max);
+  const nl = sliced.indexOf('\n');
+  return nl === -1 ? sliced : sliced.slice(nl + 1);
+};
 const INTERVAL_MIN = 15;
 const INTERVAL_MAX = 300;
 
@@ -327,6 +335,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     exitCode: number;
     stdout: string;
     stderr: string;
+    truncated: boolean;
     durationMs: number;
   }) => {
     try {
@@ -364,11 +373,13 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
       cronLastMinute.set(s.id, key);
       const start = now();
       const res = await runCommandCapture(s.command, CRON_TIMEOUT_MS, cfg.user);
+      const truncated = res.stdout.length > CRON_OUTPUT_MAX || res.stderr.length > CRON_OUTPUT_MAX;
       await pushScheduledResult({
         scheduledCommandId: s.id,
         exitCode: res.exitCode,
-        stdout: res.stdout.slice(0, CRON_OUTPUT_MAX),
-        stderr: res.stderr.slice(0, CRON_OUTPUT_MAX),
+        stdout: tailCap(res.stdout, CRON_OUTPUT_MAX),
+        stderr: tailCap(res.stderr, CRON_OUTPUT_MAX),
+        truncated,
         durationMs: now() - start,
       });
     }
