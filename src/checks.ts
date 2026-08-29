@@ -349,6 +349,21 @@ const runProcess = async (cfg: Record<string, unknown>, timeoutMs: number): Prom
  * lockout commands; it is not a sandbox, and a command that only reads what
  * this user can read will pass.
  */
+// Run a command and capture its full outcome (exit code + output), for the cron
+// runner. Grant-less and blocklist-gated, exactly like custom_script checks —
+// the command arrives over the authenticated config channel, so validateCommand
+// is the last guard. Output is left untruncated here; the API caps what it keeps.
+export const runCommandCapture = async (
+  command: string,
+  timeoutMs: number,
+  user: string | undefined,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> => {
+  const guard = validateCommand(command);
+  if (!guard.ok) return { exitCode: 126, stdout: '', stderr: `command rejected: ${guard.reason}` };
+  const res = await sh(wrapAsUser(user, command), timeoutMs);
+  return { exitCode: res.code, stdout: res.stdout, stderr: res.stderr };
+};
+
 const runShellCommand = async (
   command: string,
   timeoutMs: number,

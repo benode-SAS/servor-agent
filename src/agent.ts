@@ -1,6 +1,12 @@
 import { createHmac } from 'node:crypto';
-import { type CheckDef, type CheckResult, runCheck as defaultRunCheck } from './checks';
+import {
+  type CheckDef,
+  type CheckResult,
+  runCheck as defaultRunCheck,
+  runCommandCapture,
+} from './checks';
 import { type AgentConfig, saveConfig as defaultSaveConfig } from './config';
+import { cronMatches, minuteKey, type ScheduledCommand } from './cron';
 import { collect as defaultCollect } from './metrics';
 import { type AgentMessageKind, canonicalAgentMessage } from './protocol/agent-hmac';
 import { setExecPolicy as defaultSetExecPolicy, startTunnel as defaultStartTunnel } from './tunnel';
@@ -11,6 +17,12 @@ import { BUILD_VERSION } from './version';
 const UPDATE_INTERVAL_MS = 60 * 60 * 1000;
 /** Scheduler resolution: how often due checks are looked for, not how often they run. */
 const CHECK_TICK_MS = 10 * 1000;
+/** Cron resolution: twice a minute, so a matching minute is never missed. */
+const CRON_TICK_MS = 30 * 1000;
+/** Per-run deadline for a scheduled command. */
+const CRON_TIMEOUT_MS = 5 * 60 * 1000;
+/** Cap on captured output sent back per run. */
+const CRON_OUTPUT_MAX = 8000;
 const INTERVAL_MIN = 15;
 const INTERVAL_MAX = 300;
 
@@ -191,6 +203,12 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
   /** Last run time per check id, so each check keeps its own cadence. */
   const lastRun = new Map<string, number>();
 
+  /** Cron commands in force. Seeded from disk so a restart keeps them while the
+   * control plane is unreachable; refreshed on each config sync. */
+  let scheduledCommands: ScheduledCommand[] = cfg.scheduledCommands ?? [];
+  /** Minute already fired, per schedule id, so the 30 s tick never double-runs. */
+  const cronLastMinute = new Map<string, string>();
+
   /**
    * Pull this agent's configuration and apply it: exec policy, checks, intervals.
    *
@@ -216,6 +234,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
       if (!res.ok) return;
       const data = (await res.json()) as {
         checks?: CheckDef[];
+        scheduledCommands?: ScheduledCommand[];
         configIntervalSeconds?: number;
         metricsIntervalSeconds?: number;
         version?: string;
@@ -232,6 +251,14 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
         checks = data.checks;
         const ids = new Set(checks.map((c) => c.id));
         for (const id of lastRun.keys()) if (!ids.has(id)) lastRun.delete(id);
+      }
+      if (Array.isArray(data.scheduledCommands)) {
+        scheduledCommands = data.scheduledCommands;
+        const ids = new Set(scheduledCommands.map((s) => s.id));
+        for (const id of cronLastMinute.keys()) if (!ids.has(id)) cronLastMinute.delete(id);
+        // Persist so a restart keeps the schedule even if the control plane is
+        // unreachable at boot (checks, being live probes, are not persisted).
+        saveConfig({ scheduledCommands });
       }
       if (typeof data.configIntervalSeconds === 'number') {
         configIntervalMs = Math.max(10, data.configIntervalSeconds) * 1000;
@@ -294,6 +321,65 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     if (results.length > 0) await pushResults(results);
   };
 
+  /** POST one scheduled-command outcome; a failed push is logged and dropped. */
+  const pushScheduledResult = async (result: {
+    scheduledCommandId: string;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    durationMs: number;
+  }) => {
+    try {
+      const body = JSON.stringify({ results: [result] });
+      const { ts, sig } = sign('result', body);
+      await fetchImpl(`${cfg.apiUrl}/agent/scheduled-commands/${cfg.serverId}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-servor-timestamp': ts,
+          'x-servor-signature': sig,
+        },
+        body,
+      });
+    } catch (e) {
+      console.error('scheduled result push failed', (e as Error).message);
+    }
+  };
+
+  /**
+   * Run any scheduled command whose cron expression matches the current minute.
+   *
+   * @remarks
+   * Guarded by a per-schedule minute key so the 30 s tick fires each command at
+   * most once per matching minute. Runs are grant-less and blocklist-gated (see
+   * runCommandCapture) — the same trust model as custom_script checks — and each
+   * outcome is reported over the resilient HTTP channel, not the tunnel.
+   */
+  const runDueCron = async () => {
+    if (scheduledCommands.length === 0) return;
+    const at = new Date();
+    const key = minuteKey(at);
+    for (const s of scheduledCommands) {
+      if (cronLastMinute.get(s.id) === key || !cronMatches(s.cron, at)) continue;
+      cronLastMinute.set(s.id, key);
+      const start = now();
+      const res = await runCommandCapture(s.command, CRON_TIMEOUT_MS, cfg.user);
+      await pushScheduledResult({
+        scheduledCommandId: s.id,
+        exitCode: res.exitCode,
+        stdout: res.stdout.slice(0, CRON_OUTPUT_MAX),
+        stderr: res.stderr.slice(0, CRON_OUTPUT_MAX),
+        durationMs: now() - start,
+      });
+    }
+  };
+
+  /** Tick the cron scheduler forever; each tick runs only what matches now. */
+  const cronLoop = async () => {
+    await runDueCron();
+    later(() => void cronLoop(), CRON_TICK_MS);
+  };
+
   /** Re-sync configuration forever, at the cadence the last sync asked for. */
   const configLoop = async () => {
     await fetchConfig();
@@ -325,6 +411,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     void metricsLoop();
     void configLoop();
     void checkLoop();
+    void cronLoop();
 
     if (cfg.mode === 'tunnel') {
       const tunnel = startTunnel(cfg);

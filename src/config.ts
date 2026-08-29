@@ -23,6 +23,9 @@ export type AgentConfig = {
   mode: 'push' | 'tunnel';
   /** OS user commands are dropped to (the configured SSH user) when running as root. */
   user?: string;
+  /** Cron commands to run locally, persisted so a restart keeps them while the
+   * control plane is unreachable. Refreshed on each config sync. */
+  scheduledCommands?: Array<{ id: string; command: string; cron: string }>;
   /** Config file format version, not the agent version. */
   version: string;
 };
