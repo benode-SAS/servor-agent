@@ -446,7 +446,16 @@ const collectWindows = (version: string): Payload => {
  * influence what is collected.
  */
 export const collect = async (version: string): Promise<Payload> => {
-  if (process.platform === 'win32') return collectWindows(version);
-  if (process.platform === 'darwin') return collectDarwin(version);
-  return collectLinux(version);
+  const payload =
+    process.platform === 'win32'
+      ? await collectWindows(version)
+      : process.platform === 'darwin'
+        ? await collectDarwin(version)
+        : await collectLinux(version);
+  // Host timezone, resolved by the runtime — no shell, works on every OS.
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) payload.specs.timezone = tz;
+  } catch {}
+  return payload;
 };

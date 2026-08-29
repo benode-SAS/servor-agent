@@ -243,6 +243,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
       const data = (await res.json()) as {
         checks?: CheckDef[];
         scheduledCommands?: ScheduledCommand[];
+        runNow?: Array<{ id: string; command: string }>;
         configIntervalSeconds?: number;
         metricsIntervalSeconds?: number;
         version?: string;
@@ -268,6 +269,8 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
         // unreachable at boot (checks, being live probes, are not persisted).
         saveConfig({ scheduledCommands });
       }
+      // On-demand runs: fire and forget so a long command never stalls the poll.
+      if (Array.isArray(data.runNow) && data.runNow.length > 0) void runScheduledNow(data.runNow);
       if (typeof data.configIntervalSeconds === 'number') {
         configIntervalMs = Math.max(10, data.configIntervalSeconds) * 1000;
       }
@@ -364,6 +367,21 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
    * runCommandCapture) — the same trust model as custom_script checks — and each
    * outcome is reported over the resilient HTTP channel, not the tunnel.
    */
+  /** Run one command, capture it, and report the outcome. Shared by cron + run-now. */
+  const runScheduledOne = async (s: { id: string; command: string }) => {
+    const start = now();
+    const res = await runCommandCapture(s.command, CRON_TIMEOUT_MS, cfg.user);
+    const truncated = res.stdout.length > CRON_OUTPUT_MAX || res.stderr.length > CRON_OUTPUT_MAX;
+    await pushScheduledResult({
+      scheduledCommandId: s.id,
+      exitCode: res.exitCode,
+      stdout: tailCap(res.stdout, CRON_OUTPUT_MAX),
+      stderr: tailCap(res.stderr, CRON_OUTPUT_MAX),
+      truncated,
+      durationMs: now() - start,
+    });
+  };
+
   const runDueCron = async () => {
     if (scheduledCommands.length === 0) return;
     const at = new Date();
@@ -371,17 +389,15 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     for (const s of scheduledCommands) {
       if (cronLastMinute.get(s.id) === key || !cronMatches(s.cron, at)) continue;
       cronLastMinute.set(s.id, key);
-      const start = now();
-      const res = await runCommandCapture(s.command, CRON_TIMEOUT_MS, cfg.user);
-      const truncated = res.stdout.length > CRON_OUTPUT_MAX || res.stderr.length > CRON_OUTPUT_MAX;
-      await pushScheduledResult({
-        scheduledCommandId: s.id,
-        exitCode: res.exitCode,
-        stdout: tailCap(res.stdout, CRON_OUTPUT_MAX),
-        stderr: tailCap(res.stderr, CRON_OUTPUT_MAX),
-        truncated,
-        durationMs: now() - start,
-      });
+      await runScheduledOne(s);
+    }
+  };
+
+  /** Run the operator's on-demand requests once, suppressing a same-minute cron dup. */
+  const runScheduledNow = async (items: { id: string; command: string }[]) => {
+    for (const s of items) {
+      cronLastMinute.set(s.id, minuteKey(new Date()));
+      await runScheduledOne(s);
     }
   };
 
