@@ -23,8 +23,16 @@ import {
  * @module
  */
 
-/** Biggest file the explorer will open or save. */
-export const FS_MAX_BYTES = 2 * 1024 * 1024;
+/**
+ * Biggest file the explorer will open, save, upload or download.
+ *
+ * @remarks
+ * The whole payload travels base64-encoded inside one tunnel frame, so the
+ * ceiling is really the frame budget: 8 MiB becomes ~10.7 MiB encoded, well
+ * under the 16 MiB default. Raising it further would mean chunking rather than
+ * a bigger number.
+ */
+export const FS_MAX_BYTES = 8 * 1024 * 1024;
 /** Directory listings stop here; a directory with more is not browsable anyway. */
 export const FS_MAX_ENTRIES = 2000;
 
