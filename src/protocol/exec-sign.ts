@@ -22,9 +22,22 @@ const enc = new TextEncoder();
 const EXEC_KDF_INFO = enc.encode('servor/exec-sign/v1');
 const EXEC_DOMAIN = 'servor/exec-grant/v1';
 
+/**
+ * What the grant authorises.
+ *
+ * @remarks
+ * `fs` covers the filesystem operations the browser drives (list, read, write,
+ * move, remove…). Adding a member is backward compatible on purpose: the
+ * domain string, the field order and the HKDF info are untouched, so every
+ * signature already issued stays valid and no provisioned agent is invalidated.
+ * For `fs` the `command` field carries the canonical descriptor built by
+ * `describeFsOp` — which binds the CONTENT of a write, not just its path.
+ */
+export type ExecGrantKind = 'exec' | 'shell' | 'fs';
+
 export type ExecGrant = {
   serverId: string;
-  kind: 'exec' | 'shell';
+  kind: ExecGrantKind;
   command: string; // '' for a shell-open grant
   nonce: string;
   ts: string; // unix seconds, as string

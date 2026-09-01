@@ -1,4 +1,4 @@
-import { verifyExecGrant } from './protocol/exec-sign';
+import { type ExecGrantKind, verifyExecGrant } from './protocol/exec-sign';
 
 // End-to-end execution policy, synced from the control plane by fetchConfig.
 // Every exec and shell.open must carry a grant signed by one of the authorized
@@ -49,7 +49,7 @@ export type GrantVerifier = {
    * anything that reads them off this machine.
    */
   setKeys: (keysB64: string[]) => void;
-  verify: (kind: 'exec' | 'shell', command: string, msg: Record<string, unknown>) => boolean;
+  verify: (kind: ExecGrantKind, command: string, msg: Record<string, unknown>) => boolean;
 };
 
 /**
@@ -117,11 +117,7 @@ export const createGrantVerifier = ({
    * holding it meant to send this command, or that their browser was not
    * compromised.
    */
-  const verify = (
-    kind: 'exec' | 'shell',
-    command: string,
-    msg: Record<string, unknown>,
-  ): boolean => {
+  const verify = (kind: ExecGrantKind, command: string, msg: Record<string, unknown>): boolean => {
     if (!EXEC_REQUIRE) return true;
     const nonce = String(msg.nonce ?? '');
     const ts = String(msg.ts ?? '');

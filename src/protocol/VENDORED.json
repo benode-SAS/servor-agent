@@ -1,7 +1,11 @@
 {
   "exec-sign.ts": {
     "source": "packages/shared/src/crypto/exec-sign.ts",
-    "sha256": "a45953e3c1013c8e0e86bb28c0d88c75ba737d59636290ea28181440e9e58cab"
+    "sha256": "9ae62c7711593d67ea70ed58596e31a0eceddcdffa64213724ed52a21f5def36"
+  },
+  "fs-grant.ts": {
+    "source": "packages/shared/src/crypto/fs-grant.ts",
+    "sha256": "8255154acaba9cfda3434a66c1b5c9cba99fa253d8ff1ef1f9568ca5e55cb08d"
   },
   "wipe.ts": {
     "source": "packages/shared/src/crypto/wipe.ts",

@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import type { AgentConfig } from './config';
+import { type FsRequest, fsDescriptorFor, runFsOp } from './fs';
 import { createGrantVerifier, type GrantVerifier } from './grant';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
 
@@ -452,6 +453,32 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
           Number(msg.rows ?? 24),
           Boolean(msg.persistent),
         );
+        return;
+      }
+      case 'fs': {
+        // The descriptor is rebuilt from the decoded bytes, never from a hash
+        // the caller supplied: that is what stops a relay from keeping a valid
+        // signature while swapping the content that reaches the disk.
+        const req: FsRequest = {
+          op: String(msg.op ?? '') as FsRequest['op'],
+          path: String(msg.path ?? ''),
+          to: typeof msg.to === 'string' ? msg.to : undefined,
+          mode: typeof msg.mode === 'string' ? msg.mode : undefined,
+          content: typeof msg.content === 'string' ? msg.content : undefined,
+          recursive: msg.recursive === true,
+        };
+        const bytes = req.op === 'write' ? Buffer.from(req.content ?? '', 'base64') : null;
+        if (!grants.verify('fs', fsDescriptorFor(req, bytes), msg)) {
+          send({
+            type: 'fs.result',
+            id,
+            ok: false,
+            code: 'denied',
+            error: 'unauthorized: valid fs signature required',
+          });
+          return;
+        }
+        void runFsOp(cfg, req).then((result) => send({ type: 'fs.result', id, ...result }));
         return;
       }
       case 'shell.input': {
