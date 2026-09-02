@@ -54,6 +54,10 @@ type Service = {
   active?: boolean;
   version?: string;
   detail?: string;
+  /** Who supervises it — only `systemd` makes a `systemctl` action meaningful. */
+  supervisor?: 'systemd' | 'other';
+  /** The unit that answered `is-active`, which is what an action must target. */
+  unit?: string;
 };
 type TlsCert = { domain: string; notAfter?: string; daysLeft?: number };
 export type HostFacts = {
@@ -379,11 +383,28 @@ const collectServices = (): Service[] => {
     const version = raw.match(/\d+\.\d+(\.\d+)?/)?.[0];
     // Running counts, whatever supervises it — systemd, pm2, supervisor, a
     // container, or nothing at all.
-    const active = isActive(p.name) || isActive(`${p.name}.service`) || isRunning(p.proc);
+    const unit = isActive(p.name)
+      ? p.name
+      : isActive(`${p.name}.service`)
+        ? `${p.name}.service`
+        : null;
+    const active = unit !== null || isRunning(p.proc);
+    // Which unit answered, so the dashboard knows whether `systemctl` speaks for
+    // this service at all. Offering a restart button for a pm2-managed process
+    // would build a command that fails every single time.
+    const supervisor = unit ? 'systemd' : active ? 'other' : undefined;
     let detail: string | undefined;
     if (p.name === 'nginx')
       detail = sh(['nginx', '-t']).includes('successful') ? 'config valid' : undefined;
-    services.push({ name: p.name, kind: p.kind, active, version, detail });
+    services.push({
+      name: p.name,
+      kind: p.kind,
+      active,
+      version,
+      detail,
+      supervisor,
+      unit: unit ?? undefined,
+    });
   }
   return services.slice(0, 80);
 };
