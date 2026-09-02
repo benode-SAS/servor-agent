@@ -4,6 +4,7 @@ import type { AgentConfig } from './config';
 import { type FsRequest, fsDescriptorFor, runFsOp } from './fs';
 import { createGrantVerifier, type GrantVerifier } from './grant';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
+import { isPowerAction, POWER_COMMANDS } from './protocol/power-action';
 
 // The execution policy arrives from the control plane (fetchConfig) before the
 // tunnel is necessarily up, so the key set is held here and handed to the
@@ -438,6 +439,39 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
           return;
         }
         void runExec(id, command, Number(msg.timeoutMs ?? 0));
+        return;
+      }
+      case 'power': {
+        // The signed field is an ACTION, not a command. An unknown word is
+        // refused outright, and the command itself is looked up here — so
+        // nothing the control plane sends ever reaches a shell on this path.
+        const action = String(msg.action ?? '');
+        if (!isPowerAction(action)) {
+          send({ type: 'power.result', id, ok: false, error: 'unknown power action' });
+          return;
+        }
+        if (!grants.verify('power', action, msg)) {
+          send({
+            type: 'power.result',
+            id,
+            ok: false,
+            error: 'unauthorized: valid power signature required',
+          });
+          return;
+        }
+        // Answer before acting: `systemctl reboot` never returns, so a reply
+        // sent afterwards would never be sent at all and the operator would
+        // see a timeout on a reboot that worked.
+        send({ type: 'power.result', id, ok: true, error: null });
+        console.log(`power ${action} requested`);
+        const argv = POWER_COMMANDS[action];
+        setTimeout(() => {
+          try {
+            Bun.spawn([...argv], { stdout: 'ignore', stderr: 'ignore' });
+          } catch (e) {
+            console.error(`power ${action} failed: ${(e as Error).message}`);
+          }
+        }, 500);
         return;
       }
       case 'shell.open': {

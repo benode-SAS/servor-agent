@@ -1,7 +1,7 @@
 {
   "exec-sign.ts": {
     "source": "packages/shared/src/crypto/exec-sign.ts",
-    "sha256": "9ae62c7711593d67ea70ed58596e31a0eceddcdffa64213724ed52a21f5def36"
+    "sha256": "22a166b73127aa795e4b0c5979f1a24b5364bff6bf3f85098b20f772618c2deb"
   },
   "fs-grant.ts": {
     "source": "packages/shared/src/crypto/fs-grant.ts",
@@ -22,5 +22,9 @@
   "agent-hmac.ts": {
     "source": "packages/shared/src/crypto/agent-hmac.ts",
     "sha256": "eb267a2764c59ea97c83b6a98294c9249dabca53a048e814db83908c55b607d4"
+  },
+  "power-action.ts": {
+    "source": "packages/shared/src/utils/power-action.ts",
+    "sha256": "119e104e6f116b2756fc1eaf09311c6c590085bbada444a1eab4b7acf20660aa"
   }
 }

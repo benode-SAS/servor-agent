@@ -1,11 +1,3 @@
-// Vendored from packages/shared/src/crypto/exec-sign.ts — do not edit here.
-//
-// The agent ships as an independent, auditable artefact: a reader must be
-// able to see every line that decides whether a command runs, without
-// resolving a private Servor package. `bun run protocol:check` fails if this
-// copy drifts from the original, because a guard that disagrees with the one
-// on the control plane is worse than no guard.
-
 import { ed25519 } from '@noble/curves/ed25519';
 import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -32,8 +24,16 @@ const EXEC_DOMAIN = 'servor/exec-grant/v1';
  * signature already issued stays valid and no provisioned agent is invalidated.
  * For `fs` the `command` field carries the canonical descriptor built by
  * `describeFsOp` — which binds the CONTENT of a write, not just its path.
+ *
+ * `power` carries an **action name**, never a command line. That is the whole
+ * reason it exists as its own kind: rebooting a machine is refused by the
+ * shared blocklist, and the wrong way to allow it would be to punch a hole in
+ * that list — which would also open it for the AI and the free terminal, where
+ * the guard matters most. Instead the browser signs `reboot` or `poweroff`, the
+ * agent maps that word to a command it holds itself, and no attacker-influenced
+ * string ever reaches a shell on this path.
  */
-export type ExecGrantKind = 'exec' | 'shell' | 'fs';
+export type ExecGrantKind = 'exec' | 'shell' | 'fs' | 'power';
 
 export type ExecGrant = {
   serverId: string;
