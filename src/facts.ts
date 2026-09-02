@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { redactSecrets } from '@servor/shared/utils';
 
 // Host facts: what is running on the box + its health. Two cadences keep the
@@ -59,6 +61,14 @@ type Service = {
   /** The unit that answered `is-active`, which is what an action must target. */
   unit?: string;
 };
+type SshKey = { type: string; comment?: string; fingerprint: string };
+type UserAccount = {
+  name: string;
+  uid: number;
+  shell?: string;
+  sudo: boolean;
+  keys: SshKey[];
+};
 type TlsCert = { domain: string; notAfter?: string; daysLeft?: number };
 export type HostFacts = {
   collectedAt?: string;
@@ -69,6 +79,7 @@ export type HostFacts = {
   processes?: ProcessInfo[];
   services?: Service[];
   selfHosted?: string[];
+  users?: UserAccount[];
   systemd?: { failedCount?: number; failed?: string[] };
   cron?: CronEntry[];
   kubernetes?: { flavor?: string; nodes?: number; pods?: number };
@@ -410,6 +421,95 @@ const collectServices = (): Service[] => {
   return services.slice(0, 80);
 };
 
+/**
+ * Login accounts on the machine, and how many keys can open each.
+ *
+ * @remarks
+ * **No key material leaves the host.** Only the type, the comment and the
+ * SHA-256 fingerprint travel — which is what an operator reads to recognise a
+ * key anyway. A public key is not a secret, but shipping thousands of them in
+ * every facts push would be both wasteful and an invitation to start treating
+ * this array as a key store.
+ *
+ * `uid >= 1000` plus root is the conventional line between people and system
+ * accounts. It is a heuristic, and a deliberately conservative one: a service
+ * account that happens to sit above 1000 shows up, which is far better than
+ * hiding a real account that sits below it.
+ */
+const collectUsers = (): UserAccount[] => {
+  const passwd = (() => {
+    try {
+      return readFileSync('/etc/passwd', 'utf8');
+    } catch {
+      return '';
+    }
+  })();
+  if (!passwd) return [];
+
+  // Members of the groups that grant root. Read once rather than per user.
+  const sudoers = new Set<string>();
+  for (const group of ['sudo', 'wheel', 'admin']) {
+    const line = sh(['getent', 'group', group]);
+    for (const name of (line.split(':')[3] ?? '').split(',')) {
+      if (name.trim()) sudoers.add(name.trim());
+    }
+  }
+
+  const out: UserAccount[] = [];
+  for (const raw of passwd.split('\n')) {
+    const [name, , uidStr, , , home, shell] = raw.split(':');
+    if (!name || !uidStr) continue;
+    const uid = Number.parseInt(uidStr, 10);
+    if (!Number.isFinite(uid)) continue;
+    if (uid !== 0 && uid < 1000) continue;
+    // A user whose shell cannot log in is not an access path worth listing.
+    if (shell && /(nologin|false)$/.test(shell)) continue;
+
+    out.push({
+      name,
+      uid,
+      shell: shell || undefined,
+      sudo: uid === 0 || sudoers.has(name),
+      keys: home ? readAuthorizedKeys(home) : [],
+    });
+    if (out.length >= 60) break;
+  }
+  return out;
+};
+
+/** Fingerprints of the keys that can open an account. Never the keys. */
+const readAuthorizedKeys = (home: string): SshKey[] => {
+  const path = `${home}/.ssh/authorized_keys`;
+  let content = '';
+  try {
+    content = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  const keys: SshKey[] = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(/\s+/);
+    // `type base64 comment`, possibly preceded by options. Find the type.
+    const i = parts.findIndex((p) => p.startsWith('ssh-') || p.startsWith('ecdsa-'));
+    if (i === -1) continue;
+    const type = parts[i] as string;
+    const blob = parts[i + 1];
+    if (!blob) continue;
+    const comment = parts.slice(i + 2).join(' ') || undefined;
+    keys.push({
+      type,
+      comment: comment?.slice(0, 120),
+      // The same fingerprint `ssh-keygen -lf` prints, so an operator can match
+      // it against what they hold without us shipping the key itself.
+      fingerprint: `SHA256:${createHash('sha256').update(Buffer.from(blob, 'base64')).digest('base64').replace(/=+$/, '')}`,
+    });
+    if (keys.length >= 30) break;
+  }
+  return keys;
+};
+
 const collectSelfHosted = (): string[] => {
   const found: string[] = [];
   if (bash('test -d /data/coolify && echo 1') === '1') found.push('coolify');
@@ -543,6 +643,9 @@ const collectHeavy = (): Partial<HostFacts> => {
     docker: has('docker') ? { version: dockerVersion } : undefined,
     services,
     selfHosted: collectSelfHosted(),
+    // Heavy side: reading every home's authorized_keys is filesystem work that
+    // has no business running on the fast metrics cadence.
+    users: collectUsers(),
     kubernetes: collectKubernetes(),
     domains,
     tls: collectTls(),
