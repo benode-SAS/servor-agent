@@ -1,3 +1,5 @@
+import { redactSecrets } from '@servor/shared/utils';
+
 // Host facts: what is running on the box + its health. Two cadences keep the
 // agent light: live parts (containers, pm2, failed units) are recomputed on every
 // call; heavy parts (service versions, TLS, k8s, domains, firewall…) are cached
@@ -64,6 +66,7 @@ export type HostFacts = {
   services?: Service[];
   selfHosted?: string[];
   systemd?: { failedCount?: number; failed?: string[] };
+  cron?: CronEntry[];
   kubernetes?: { flavor?: string; nodes?: number; pods?: number };
   tls?: TlsCert[];
   domains?: string[];
@@ -155,6 +158,116 @@ const collectPm2 = (): { pm2?: { version?: string }; processes?: ProcessInfo[] }
     }
   } catch {}
   return { pm2: { version }, processes: processes.slice(0, 300) };
+};
+
+/**
+ * One scheduled job already present on the machine, discovered — never written.
+ *
+ * @remarks
+ * Servor's own scheduled commands never reach the system crontab: the agent
+ * evaluates their expressions in-process and runs them itself. Everything found
+ * here is therefore the operator's own, and the two lists cannot overlap.
+ */
+type CronEntry = {
+  schedule: string;
+  command: string;
+  /** Present for /etc/crontab and /etc/cron.d, which carry a user column. */
+  user?: string;
+  /** Where it was read from, so the UI can say `/etc/cron.d/backup`. */
+  source: string;
+};
+
+const CRON_SPECIALS = new Set([
+  '@reboot',
+  '@yearly',
+  '@annually',
+  '@monthly',
+  '@weekly',
+  '@daily',
+  '@midnight',
+  '@hourly',
+]);
+
+/**
+ * Parse a crontab, tolerating everything a real one contains.
+ *
+ * @param withUser - true for `/etc/crontab` and `/etc/cron.d/*`, whose lines
+ * carry a user column between the schedule and the command. A per-user spool
+ * has no such column, and reading one as the other would silently turn the
+ * first word of every command into a username.
+ *
+ * @remarks
+ * Comments and `KEY=value` assignments are skipped rather than parsed: `MAILTO`
+ * and `PATH` are not jobs. Commands are redacted, because a cron line is one of
+ * the likelier places on a box to find a token sitting in plain sight.
+ */
+export const parseCrontab = (content: string, withUser: boolean, source: string): CronEntry[] => {
+  const out: CronEntry[] = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    // MAILTO="x", PATH=/usr/bin, SHELL=/bin/sh — settings, not schedules.
+    if (/^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(line)) continue;
+
+    const parts = line.split(/\s+/);
+    let schedule: string;
+    let rest: string[];
+    const head = parts[0];
+    if (head && CRON_SPECIALS.has(head)) {
+      schedule = head;
+      rest = parts.slice(1);
+    } else if (parts.length >= (withUser ? 7 : 6)) {
+      schedule = parts.slice(0, 5).join(' ');
+      rest = parts.slice(5);
+    } else {
+      continue;
+    }
+
+    const user = withUser ? rest[0] : undefined;
+    const command = (withUser ? rest.slice(1) : rest).join(' ');
+    if (!command) continue;
+    out.push({ schedule, command: redactSecrets(command).text, user, source });
+  }
+  return out;
+};
+
+/**
+ * Everything the machine schedules on its own: the system crontab, its
+ * drop-ins, and the per-user spools when the agent can read them.
+ */
+const collectCron = (): CronEntry[] => {
+  const entries: CronEntry[] = [];
+  const read = (path: string): string => bash(`cat ${JSON.stringify(path)} 2>/dev/null`);
+
+  entries.push(...parseCrontab(read('/etc/crontab'), true, '/etc/crontab'));
+
+  for (const name of bash('ls -1 /etc/cron.d 2>/dev/null').split('\n')) {
+    const file = name.trim();
+    // cron itself ignores drop-ins whose name contains a dot.
+    if (!file || file.includes('.')) continue;
+    entries.push(...parseCrontab(read(`/etc/cron.d/${file}`), true, `/etc/cron.d/${file}`));
+  }
+
+  // Both layouts exist: Debian spools under crontabs/, RHEL directly.
+  for (const dir of ['/var/spool/cron/crontabs', '/var/spool/cron']) {
+    for (const name of bash(`ls -1 ${dir} 2>/dev/null`).split('\n')) {
+      const user = name.trim();
+      if (!user) continue;
+      entries.push(
+        ...parseCrontab(read(`${dir}/${user}`), false, `crontab:${user}`).map((e) => ({
+          ...e,
+          user,
+        })),
+      );
+    }
+  }
+
+  // Last resort when the spools are unreadable: the agent's own crontab.
+  if (entries.length === 0 && has('crontab')) {
+    entries.push(...parseCrontab(sh(['crontab', '-l']), false, 'crontab'));
+  }
+
+  return entries.slice(0, 200);
 };
 
 const collectFailedUnits = (): { failedCount?: number; failed?: string[] } => {
@@ -391,6 +504,7 @@ export const getFacts = (): HostFacts => {
   const { pm2, processes } = collectPm2();
   // Live, like pm2: a program can be added or stopped between two heavy passes.
   const { supervisor } = collectSupervisor();
+  const cron = collectCron();
   const systemd = collectFailedUnits();
   const running = containers.filter((c) => c.state === 'running').length;
   return {
@@ -405,5 +519,6 @@ export const getFacts = (): HostFacts => {
     supervisor,
     processes: processes?.length ? processes : undefined,
     systemd,
+    cron: cron.length ? cron : undefined,
   };
 };
