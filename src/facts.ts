@@ -16,6 +16,17 @@ const bash = (script: string, timeoutMs = 5000): string => sh(['bash', '-lc', sc
 const has = (bin: string): boolean => bash(`command -v ${bin} >/dev/null 2>&1 && echo 1`) === '1';
 const isActive = (svc: string): boolean => sh(['systemctl', 'is-active', svc]) === 'active';
 
+/**
+ * Is a process by that exact name running, whoever started it?
+ *
+ * @remarks
+ * `systemctl is-active` only answers for units systemd owns. A service run
+ * under pm2, supervisor, a container or plain `&` is invisible to it, and was
+ * reported as inactive while serving traffic. `--` keeps a name that starts
+ * with a dash from being read as an option, as in checks.ts.
+ */
+const isRunning = (proc: string): boolean => sh(['pgrep', '-x', '--', proc]).length > 0;
+
 type Container = {
   name: string;
   image?: string;
@@ -48,6 +59,7 @@ export type HostFacts = {
   docker?: { version?: string; running?: number; total?: number };
   containers?: Container[];
   pm2?: { version?: string };
+  supervisor?: { version?: string; programs?: string[] };
   processes?: ProcessInfo[];
   services?: Service[];
   selfHosted?: string[];
@@ -160,20 +172,91 @@ const collectFailedUnits = (): { failedCount?: number; failed?: string[] } => {
 
 // ── heavy (cached) ────────────────────────────────────────────────────────────
 
-const SERVICE_PROBES: { name: string; kind: Service['kind']; bin: string; version: string[] }[] = [
-  { name: 'nginx', kind: 'web', bin: 'nginx', version: ['nginx', '-v'] },
-  { name: 'caddy', kind: 'web', bin: 'caddy', version: ['caddy', 'version'] },
-  { name: 'apache2', kind: 'web', bin: 'apache2', version: ['apache2', '-v'] },
-  { name: 'httpd', kind: 'web', bin: 'httpd', version: ['httpd', '-v'] },
-  { name: 'haproxy', kind: 'proxy', bin: 'haproxy', version: ['haproxy', '-v'] },
-  { name: 'traefik', kind: 'proxy', bin: 'traefik', version: ['traefik', 'version'] },
-  { name: 'postgresql', kind: 'database', bin: 'psql', version: ['psql', '--version'] },
-  { name: 'mysql', kind: 'database', bin: 'mysqld', version: ['mysqld', '--version'] },
-  { name: 'mariadb', kind: 'database', bin: 'mariadbd', version: ['mariadbd', '--version'] },
-  { name: 'mongod', kind: 'database', bin: 'mongod', version: ['mongod', '--version'] },
-  { name: 'redis', kind: 'cache', bin: 'redis-server', version: ['redis-server', '--version'] },
-  { name: 'memcached', kind: 'cache', bin: 'memcached', version: ['memcached', '-h'] },
+// `bin` is what proves the software is installed; `proc` is what proves it is
+// running. They differ more often than not — postgresql is detected through its
+// client `psql` but runs as `postgres`.
+const SERVICE_PROBES: {
+  name: string;
+  kind: Service['kind'];
+  bin: string;
+  proc: string;
+  version: string[];
+}[] = [
+  { name: 'nginx', kind: 'web', bin: 'nginx', proc: 'nginx', version: ['nginx', '-v'] },
+  { name: 'caddy', kind: 'web', bin: 'caddy', proc: 'caddy', version: ['caddy', 'version'] },
+  { name: 'apache2', kind: 'web', bin: 'apache2', proc: 'apache2', version: ['apache2', '-v'] },
+  { name: 'httpd', kind: 'web', bin: 'httpd', proc: 'httpd', version: ['httpd', '-v'] },
+  { name: 'haproxy', kind: 'proxy', bin: 'haproxy', proc: 'haproxy', version: ['haproxy', '-v'] },
+  {
+    name: 'traefik',
+    kind: 'proxy',
+    bin: 'traefik',
+    proc: 'traefik',
+    version: ['traefik', 'version'],
+  },
+  {
+    name: 'postgresql',
+    kind: 'database',
+    bin: 'psql',
+    proc: 'postgres',
+    version: ['psql', '--version'],
+  },
+  {
+    name: 'mysql',
+    kind: 'database',
+    bin: 'mysqld',
+    proc: 'mysqld',
+    version: ['mysqld', '--version'],
+  },
+  {
+    name: 'mariadb',
+    kind: 'database',
+    bin: 'mariadbd',
+    proc: 'mariadbd',
+    version: ['mariadbd', '--version'],
+  },
+  {
+    name: 'mongod',
+    kind: 'database',
+    bin: 'mongod',
+    proc: 'mongod',
+    version: ['mongod', '--version'],
+  },
+  {
+    name: 'redis',
+    kind: 'cache',
+    bin: 'redis-server',
+    proc: 'redis-server',
+    version: ['redis-server', '--version'],
+  },
+  {
+    name: 'memcached',
+    kind: 'cache',
+    bin: 'memcached',
+    proc: 'memcached',
+    version: ['memcached', '-h'],
+  },
 ];
+
+/**
+ * supervisord, pm2's closest peer: a userland process manager that owns its own
+ * programs and its own log files, and that systemd knows nothing about.
+ *
+ * @remarks
+ * `supervisorctl status` exits non-zero when any program is not RUNNING, so its
+ * output is parsed regardless of the exit code — an all-stopped supervisor is
+ * still a supervisor worth reporting.
+ */
+const collectSupervisor = (): { supervisor?: { version?: string; programs?: string[] } } => {
+  if (!has('supervisorctl')) return {};
+  const version = sh(['supervisorctl', 'version']) || undefined;
+  const programs: string[] = [];
+  for (const line of sh(['supervisorctl', 'status']).split('\n')) {
+    const name = line.trim().split(/\s+/)[0];
+    if (name) programs.push(name);
+  }
+  return { supervisor: { version, programs: programs.slice(0, 300) } };
+};
 
 const collectServices = (): Service[] => {
   const services: Service[] = [];
@@ -181,7 +264,9 @@ const collectServices = (): Service[] => {
     if (!has(p.bin)) continue;
     const raw = sh(p.version).split('\n')[0] ?? '';
     const version = raw.match(/\d+\.\d+(\.\d+)?/)?.[0];
-    const active = isActive(p.name) || isActive(`${p.name}.service`);
+    // Running counts, whatever supervises it — systemd, pm2, supervisor, a
+    // container, or nothing at all.
+    const active = isActive(p.name) || isActive(`${p.name}.service`) || isRunning(p.proc);
     let detail: string | undefined;
     if (p.name === 'nginx')
       detail = sh(['nginx', '-t']).includes('successful') ? 'config valid' : undefined;
@@ -304,6 +389,8 @@ export const getFacts = (): HostFacts => {
   }
   const containers = collectContainers();
   const { pm2, processes } = collectPm2();
+  // Live, like pm2: a program can be added or stopped between two heavy passes.
+  const { supervisor } = collectSupervisor();
   const systemd = collectFailedUnits();
   const running = containers.filter((c) => c.state === 'running').length;
   return {
@@ -315,6 +402,7 @@ export const getFacts = (): HostFacts => {
         : undefined,
     containers: containers.length ? containers : undefined,
     pm2,
+    supervisor,
     processes: processes?.length ? processes : undefined,
     systemd,
   };
