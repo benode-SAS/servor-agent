@@ -432,6 +432,23 @@ describe('interactive sessions', () => {
     expect(spawns).toEqual([]);
   });
 
+  test('a PTY session forces the same PATH as a one-shot command (posix)', () => {
+    if (process.platform === 'win32') return; // powershell path does not force PATH
+    if (process.platform === 'darwin') return; // its branch runs a login bash instead
+    // `script -c` hands its argument to /bin/sh, which sources no profile. Without
+    // a forced PATH a per-user tool died on `sh: 1: pm2: not found` while the very
+    // same command succeeded as a one-shot exec.
+    const { socket } = online();
+    socket().deliver(signed('shell', 'pm2 logs web --lines 20 --raw', { id: 'sh-1' }));
+
+    const argv = spawns[0] ?? [];
+    const pathArg = argv.find((a) => a.startsWith('PATH='));
+    expect(pathArg).toBeDefined();
+    expect(argv).toContain('script');
+    // The signed string still reaches the shell untouched.
+    expect(argv).toContain('pm2 logs web --lines 20 --raw');
+  });
+
   test('an authorized session starts and streams its output', async () => {
     const { socket } = online();
     socket().deliver(signed('shell', 'bash -l', { id: 'sh-1' }));

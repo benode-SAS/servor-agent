@@ -144,11 +144,21 @@ const wrapExec = (cfg: AgentConfig, command: string, execPath: string): string[]
  * differently — no colours, no prompts, no line editing — and interactive tools
  * refuse to run at all. The flags differ on macOS because its `script` takes
  * the output file first.
+ *
+ * The PATH is forced here for the same reason it is in `wrapExec`, and it was
+ * missing: `script -c` runs its argument through `/bin/sh`, which inherits
+ * whatever bare environment the agent has and sources no profile. A command
+ * naming a per-user tool — `pm2`, an nvm-installed binary — therefore died on
+ * `sh: 1: pm2: not found` even though the same command succeeded as a one-shot
+ * exec. macOS escapes it only because its branch runs a *login* bash, which
+ * sources the profile itself.
+ *
+ * This is env, not the signed command: the string still executes verbatim.
  */
-const wrapShell = (cfg: AgentConfig, command: string): string[] => {
+const wrapShell = (cfg: AgentConfig, command: string, execPath: string): string[] => {
   if (process.platform === 'win32') return ['powershell', '-NoProfile', '-Command', command];
   if (process.platform === 'darwin') return ['script', '-q', '/dev/null', 'bash', '-lc', command];
-  const base = ['script', '-qfc', command, '/dev/null'];
+  const base = ['env', `PATH=${execPath}`, 'script', '-qfc', command, '/dev/null'];
   if (cfg.user && isRoot()) return ['runuser', '-u', cfg.user, '--', ...base];
   return base;
 };
@@ -371,7 +381,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
     persistent: boolean,
   ) => {
     try {
-      const proc = spawn(wrapShell(cfg, command || 'bash -l'), {
+      const proc = spawn(wrapShell(cfg, command || 'bash -l', execPath), {
         stdin: 'pipe',
         stdout: 'pipe',
         stderr: 'pipe',
