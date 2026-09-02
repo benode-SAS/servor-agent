@@ -78,6 +78,7 @@ export type HostFacts = {
     rebootRequired?: boolean;
     firewall?: string;
     firewallActive?: boolean;
+    firewallRules?: string[];
     timeSync?: boolean;
   };
 };
@@ -488,7 +489,44 @@ const collectHealth = (): HostFacts['health'] => {
     firewallActive = true;
   }
   const timeSync = sh(['timedatectl', 'show', '-p', 'NTPSynchronized', '--value']) === 'yes';
-  return { rebootRequired, firewall, firewallActive, timeSync };
+  return {
+    rebootRequired,
+    firewall,
+    firewallActive,
+    firewallRules: collectFirewallRules(firewall),
+    timeSync,
+  };
+};
+
+/**
+ * The rules the firewall is actually enforcing, as lines to display.
+ *
+ * @remarks
+ * Kept as opaque text rather than parsed into a structure. ufw, firewalld and
+ * nftables describe rules in three unrelated grammars, and a parser that got
+ * one of them subtly wrong would show an operator a permissive rule as
+ * restrictive — worse than showing them the tool's own output, which they
+ * already know how to read.
+ *
+ * Capped hard: a busy nftables ruleset runs to thousands of lines, and this
+ * travels in every facts push.
+ */
+const collectFirewallRules = (kind: string): string[] => {
+  const raw =
+    kind === 'ufw'
+      ? sh(['ufw', 'status', 'numbered'])
+      : kind === 'firewalld'
+        ? sh(['firewall-cmd', '--list-all'])
+        : kind === 'nftables'
+          ? bash('nft list ruleset 2>/dev/null')
+          : '';
+  if (!raw) return [];
+  return raw
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .slice(0, 80)
+    .map((l) => l.slice(0, 200));
 };
 
 let heavyCache: Partial<HostFacts> | null = null;
