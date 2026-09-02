@@ -61,6 +61,12 @@ type Service = {
   /** The unit that answered `is-active`, which is what an action must target. */
   unit?: string;
 };
+type PackageUpdates = {
+  manager: 'apt' | 'dnf';
+  total: number;
+  security: number;
+  packages: string[];
+};
 type SshKey = { type: string; comment?: string; fingerprint: string };
 type UserAccount = {
   name: string;
@@ -80,6 +86,7 @@ export type HostFacts = {
   services?: Service[];
   selfHosted?: string[];
   users?: UserAccount[];
+  updates?: PackageUpdates;
   systemd?: { failedCount?: number; failed?: string[] };
   cron?: CronEntry[];
   kubernetes?: { flavor?: string; nodes?: number; pods?: number };
@@ -477,6 +484,53 @@ const collectUsers = (): UserAccount[] => {
   return out;
 };
 
+/**
+ * Pending package updates, and how many of them are security fixes.
+ *
+ * @remarks
+ * Read-only, and it must stay that way: `apt-get update` writes to the package
+ * cache and takes a lock, which would fight with the operator's own session.
+ * The lists here are whatever the last refresh left behind, which is exactly
+ * what `apt list --upgradable` reports and what the machine itself acts on.
+ *
+ * The security count is what matters. "142 updates pending" is background
+ * noise on any Debian box; "3 security updates pending" is a decision.
+ */
+const collectUpdates = (): PackageUpdates | undefined => {
+  if (has('apt')) {
+    const raw = bash('apt list --upgradable 2>/dev/null');
+    const lines = raw
+      .split('\n')
+      .filter((l) => l.includes('/') && !l.startsWith('Listing'))
+      .map((l) => l.trim());
+    const security = lines.filter((l) => /-security/i.test(l)).length;
+    return {
+      manager: 'apt',
+      total: lines.length,
+      security,
+      // Package names only — a full apt line carries versions and origins that
+      // add length without telling the operator anything they act on.
+      packages: lines.map((l) => (l.split('/')[0] ?? '').trim()).filter(Boolean).slice(0, 60),
+    };
+  }
+  if (has('dnf')) {
+    // `check-update` exits 100 when updates exist, which is not a failure.
+    const raw = bash('dnf -q check-update 2>/dev/null || true');
+    const lines = raw.split('\n').filter((l) => /^\S+\.\S+\s+\S+\s+\S+$/.test(l.trim()));
+    const security = Number.parseInt(
+      bash('dnf -q updateinfo list security 2>/dev/null | wc -l') || '0',
+      10,
+    );
+    return {
+      manager: 'dnf',
+      total: lines.length,
+      security: Number.isFinite(security) ? security : 0,
+      packages: lines.map((l) => (l.trim().split(/\s+/)[0] ?? '').trim()).filter(Boolean).slice(0, 60),
+    };
+  }
+  return undefined;
+};
+
 /** Fingerprints of the keys that can open an account. Never the keys. */
 const readAuthorizedKeys = (home: string): SshKey[] => {
   const path = `${home}/.ssh/authorized_keys`;
@@ -646,6 +700,7 @@ const collectHeavy = (): Partial<HostFacts> => {
     // Heavy side: reading every home's authorized_keys is filesystem work that
     // has no business running on the fast metrics cadence.
     users: collectUsers(),
+    updates: collectUpdates(),
     kubernetes: collectKubernetes(),
     domains,
     tls: collectTls(),
