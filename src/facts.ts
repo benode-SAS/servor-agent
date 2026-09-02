@@ -32,6 +32,8 @@ type ProcessInfo = {
   cpu?: number;
   memMb?: number;
   uptimeSec?: number;
+  outLogPath?: string;
+  errLogPath?: string;
 };
 type Service = {
   name: string;
@@ -135,6 +137,8 @@ const collectPm2 = (): { pm2?: { version?: string }; processes?: ProcessInfo[] }
             : undefined,
         uptimeSec:
           env.status === 'online' && upMs ? Math.round((Date.now() - upMs) / 1000) : undefined,
+        outLogPath: env.pm_out_log_path as string | undefined,
+        errLogPath: env.pm_err_log_path as string | undefined,
       });
     }
   } catch {}
