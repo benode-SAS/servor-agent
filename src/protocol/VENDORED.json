@@ -5,7 +5,7 @@
   },
   "fs-grant.ts": {
     "source": "packages/shared/src/crypto/fs-grant.ts",
-    "sha256": "8255154acaba9cfda3434a66c1b5c9cba99fa253d8ff1ef1f9568ca5e55cb08d"
+    "sha256": "59e259a95f4bd0f5252b0d485b9546b293fde562aa32f66594da0139cb1946f2"
   },
   "wipe.ts": {
     "source": "packages/shared/src/crypto/wipe.ts",

@@ -43,7 +43,7 @@ beforeAll(() => {
       return new Response('nope', { status: 404 });
     },
   });
-  port = server.port;
+  port = server.port ?? 0;
 });
 
 afterAll(() => {

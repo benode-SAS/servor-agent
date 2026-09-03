@@ -66,6 +66,10 @@ export type FsResponse =
       stat?: FsEntry;
       /** base64, `read` only. */
       content?: string;
+      /** Minted by `write-begin`; the id every later chunk carries. */
+      uploadId?: string;
+      /** Bytes an upload holds so far — also the offset the next chunk must use. */
+      written?: number;
     }
   | { ok: false; error: string; code: FsErrorCode };
 

@@ -139,3 +139,61 @@ export const isProtectedFsPath = (path: string): boolean => {
   if (PROTECTED.has(trimmed)) return true;
   return /^[A-Za-z]:[\\/]?$/.test(trimmed) || /^[A-Za-z]:[\\/]Windows$/i.test(trimmed);
 };
+
+// ── Chunked uploads ─────────────────────────────────────────────────────────
+//
+// One `write` carries the whole file inside a single tunnel frame, which caps it
+// at the frame budget. A chunked upload lifts that ceiling **without touching
+// the signature model**: every chunk is its own signed operation covering its
+// own bytes, and the file only appears at its final path when the last one has
+// landed. There is no point at which the agent is trusting an unsigned byte, and
+// no point at which a half-written file is visible under the real name.
+//
+// These get their own descriptor rather than a new field on `describeFsOp`: an
+// extra field there would change the descriptor of every existing operation, so
+// a browser one version ahead of an agent would have all of its ordinary file
+// operations refused. Kept apart, the old descriptor is byte-identical and only
+// the new operations need a recent agent.
+
+export const FS_CHUNK_OPS = ['write-begin', 'write-chunk', 'write-commit', 'write-abort'] as const;
+export type FsChunkOp = (typeof FS_CHUNK_OPS)[number];
+
+export const isFsChunkOp = (value: string): value is FsChunkOp =>
+  (FS_CHUNK_OPS as readonly string[]).includes(value);
+
+/** Biggest single chunk; base64 of this still fits one tunnel frame comfortably. */
+export const FS_CHUNK_MAX_BYTES = 4 * 1024 * 1024;
+/** Biggest file a chunked upload will assemble. */
+export const FS_UPLOAD_MAX_BYTES = 512 * 1024 * 1024;
+
+export type FsChunkDescriptorInput = {
+  op: FsChunkOp;
+  /** Empty on `write-begin`: the agent mints the id and returns it. */
+  uploadId: string;
+  /** Final destination. Carried by every operation, not just the first. */
+  path: string;
+  /** Byte offset this chunk starts at; `0` for the other operations. */
+  offset: number;
+  /** Hash of this chunk's exact bytes; `''` for the other operations. */
+  contentHash: string;
+  /** Declared total, checked at commit; `0` for chunk and abort. */
+  totalBytes: number;
+  /** Octal mode for the finished file, or `''` to keep what is already there. */
+  mode: string;
+};
+
+/**
+ * The string signed as an `fs` grant's `command` for a chunked upload.
+ *
+ * @remarks
+ * Fixed arity and length prefixes, exactly like `describeFsOp`. The final path
+ * is in every operation on purpose: the upload id is minted by the agent and
+ * relayed, so a relay could hand the browser an id belonging to somebody else's
+ * upload. Signing the path too means such a swap can only ever redirect bytes to
+ * an upload already targeting that same path — which is the destination the user
+ * approved anyway.
+ */
+export const describeFsChunk = (i: FsChunkDescriptorInput): string =>
+  [`fs.${i.op}`, i.uploadId, i.path, String(i.offset), i.contentHash, String(i.totalBytes), i.mode]
+    .map(field)
+    .join('');

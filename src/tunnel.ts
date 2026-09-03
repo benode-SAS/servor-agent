@@ -2,9 +2,11 @@ import { createHmac } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import type { AgentConfig } from './config';
 import { type FsRequest, fsDescriptorFor, runFsOp } from './fs';
+import { chunkBytes, chunkDescriptorFor, type FsChunkRequest, runFsChunkOp } from './fs-upload';
 import { createGrantVerifier, type GrantVerifier } from './grant';
 import { type NetRequest, netBodyBytes, netDescriptorFor, runNetRequest } from './net';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
+import { isFsChunkOp } from './protocol/fs-grant';
 import type { LocalHeader, LocalMethod, LocalScheme } from './protocol/net-grant';
 import { isPowerAction, POWER_COMMANDS } from './protocol/power-action';
 
@@ -509,6 +511,37 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         return;
       }
       case 'fs': {
+        // A chunked upload is still an `fs` frame and still an `fs` grant — only
+        // its descriptor differs, because it has to cover an offset and an
+        // upload id that an ordinary operation has no place for.
+        const op = String(msg.op ?? '');
+        if (isFsChunkOp(op)) {
+          const chunkReq: FsChunkRequest = {
+            op,
+            uploadId: typeof msg.uploadId === 'string' ? msg.uploadId : '',
+            path: String(msg.path ?? ''),
+            offset: Number(msg.offset ?? 0),
+            content: typeof msg.content === 'string' ? msg.content : '',
+            totalBytes: Number(msg.totalBytes ?? 0),
+            mode: typeof msg.mode === 'string' ? msg.mode : '',
+          };
+          const bytes = chunkBytes(chunkReq);
+          if (!grants.verify('fs', chunkDescriptorFor(chunkReq, bytes), msg)) {
+            send({
+              type: 'fs.result',
+              id,
+              ok: false,
+              code: 'denied',
+              error: 'unauthorized: valid fs signature required',
+            });
+            return;
+          }
+          void runFsChunkOp(chunkReq, bytes).then((result) =>
+            send({ type: 'fs.result', id, ...result }),
+          );
+          return;
+        }
+
         // The descriptor is rebuilt from the decoded bytes, never from a hash
         // the caller supplied: that is what stops a relay from keeping a valid
         // signature while swapping the content that reaches the disk.
