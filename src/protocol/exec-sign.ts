@@ -1,3 +1,11 @@
+// Vendored from packages/shared/src/crypto/exec-sign.ts — do not edit here.
+//
+// The agent ships as an independent, auditable artefact: a reader must be
+// able to see every line that decides whether a command runs, without
+// resolving a private Servor package. `bun run protocol:check` fails if this
+// copy drifts from the original, because a guard that disagrees with the one
+// on the control plane is worse than no guard.
+
 import { ed25519 } from '@noble/curves/ed25519';
 import { hkdf } from '@noble/hashes/hkdf';
 import { sha256 } from '@noble/hashes/sha256';
@@ -32,8 +40,14 @@ const EXEC_DOMAIN = 'servor/exec-grant/v1';
  * the guard matters most. Instead the browser signs `reboot` or `poweroff`, the
  * agent maps that word to a command it holds itself, and no attacker-influenced
  * string ever reaches a shell on this path.
+ *
+ * `net` is one HTTP request made from inside the machine, to a service that
+ * only listens there. Its `command` carries the descriptor built by
+ * `describeLocalRequest` — method, host, port, path, headers and the HASH of
+ * the body — so an approval for `GET /metrics` cannot be replayed as a
+ * `DELETE`, and no relay can keep the signature while changing what is sent.
  */
-export type ExecGrantKind = 'exec' | 'shell' | 'fs' | 'power';
+export type ExecGrantKind = 'exec' | 'shell' | 'fs' | 'power' | 'net';
 
 export type ExecGrant = {
   serverId: string;

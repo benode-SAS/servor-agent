@@ -591,7 +591,10 @@ const collectUpdates = (): PackageUpdates | undefined => {
       security,
       // Package names only — a full apt line carries versions and origins that
       // add length without telling the operator anything they act on.
-      packages: lines.map((l) => (l.split('/')[0] ?? '').trim()).filter(Boolean).slice(0, 60),
+      packages: lines
+        .map((l) => (l.split('/')[0] ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 60),
     };
   }
   if (has('dnf')) {
@@ -606,7 +609,10 @@ const collectUpdates = (): PackageUpdates | undefined => {
       manager: 'dnf',
       total: lines.length,
       security: Number.isFinite(security) ? security : 0,
-      packages: lines.map((l) => (l.trim().split(/\s+/)[0] ?? '').trim()).filter(Boolean).slice(0, 60),
+      packages: lines
+        .map((l) => (l.trim().split(/\s+/)[0] ?? '').trim())
+        .filter(Boolean)
+        .slice(0, 60),
     };
   }
   return undefined;

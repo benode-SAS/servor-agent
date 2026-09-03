@@ -3,7 +3,9 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import type { AgentConfig } from './config';
 import { type FsRequest, fsDescriptorFor, runFsOp } from './fs';
 import { createGrantVerifier, type GrantVerifier } from './grant';
+import { type NetRequest, netBodyBytes, netDescriptorFor, runNetRequest } from './net';
 import { canonicalAgentMessage } from './protocol/agent-hmac';
+import type { LocalHeader, LocalMethod, LocalScheme } from './protocol/net-grant';
 import { isPowerAction, POWER_COMMANDS } from './protocol/power-action';
 
 // The execution policy arrives from the control plane (fetchConfig) before the
@@ -530,6 +532,41 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
           return;
         }
         void runFsOp(cfg, req).then((result) => send({ type: 'fs.result', id, ...result }));
+        return;
+      }
+      case 'net': {
+        // Same rule as `fs`: the descriptor is rebuilt from the decoded bytes,
+        // so the request that goes out is the one that was signed — down to the
+        // headers and the body — and not whatever the relay claims it hashed.
+        const req: NetRequest = {
+          scheme: String(msg.scheme ?? 'http') as LocalScheme,
+          host: String(msg.host ?? ''),
+          port: Number(msg.port ?? 0),
+          method: String(msg.method ?? 'GET') as LocalMethod,
+          path: String(msg.path ?? ''),
+          headers: Array.isArray(msg.headers)
+            ? (msg.headers as LocalHeader[]).map((h) => ({
+                name: String(h?.name ?? ''),
+                value: String(h?.value ?? ''),
+              }))
+            : [],
+          body: typeof msg.body === 'string' ? msg.body : undefined,
+          insecureTls: msg.insecureTls === true,
+        };
+        if (!grants.verify('net', netDescriptorFor(req, netBodyBytes(req)), msg)) {
+          send({
+            type: 'net.result',
+            id,
+            ok: false,
+            code: 'denied',
+            error: 'unauthorized: valid net signature required',
+          });
+          return;
+        }
+        // The URL is logged, the headers and both bodies never are: an
+        // Authorization header on a local admin API is a credential.
+        console.log(`net ${req.method} ${req.scheme}://${req.host}:${req.port}${req.path}`);
+        void runNetRequest(req).then((result) => send({ type: 'net.result', id, ...result }));
         return;
       }
       case 'shell.input': {
