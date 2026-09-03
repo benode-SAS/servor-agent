@@ -61,6 +61,17 @@ type Service = {
   /** The unit that answered `is-active`, which is what an action must target. */
   unit?: string;
 };
+type MountInfo = {
+  mount: string;
+  device: string;
+  fstype?: string;
+  usedKb: number;
+  availKb: number;
+  /** Inodes run out independently of space — the failure df -h cannot show. */
+  inodesUsedPct?: number;
+};
+type SmartInfo = { device: string; healthy?: boolean };
+type StorageInfo = { mounts: MountInfo[]; smart: SmartInfo[] };
 type PackageUpdates = {
   manager: 'apt' | 'dnf';
   total: number;
@@ -87,6 +98,7 @@ export type HostFacts = {
   selfHosted?: string[];
   users?: UserAccount[];
   updates?: PackageUpdates;
+  storage?: StorageInfo;
   systemd?: { failedCount?: number; failed?: string[] };
   cron?: CronEntry[];
   kubernetes?: { flavor?: string; nodes?: number; pods?: number };
@@ -496,6 +508,75 @@ const collectUsers = (): UserAccount[] => {
  * The security count is what matters. "142 updates pending" is background
  * noise on any Debian box; "3 security updates pending" is a decision.
  */
+/**
+ * Storage beyond the percentage: mounts, inodes, and disk health.
+ *
+ * @remarks
+ * The disk-usage percentage already reported misses the two failures that
+ * actually take a machine down. **Inodes** run out independently of space — a
+ * directory full of tiny session files fills the table while `df -h` still
+ * reads 40%, and every write then fails with ENOSPC on a disk that looks
+ * half-empty. And a **failing drive** announces itself in SMART hours or days
+ * before it stops answering, which is the only warning anyone gets.
+ *
+ * SMART needs root and `smartctl`; where either is missing the field is simply
+ * absent, like every other probe here.
+ */
+const collectStorage = (): StorageInfo | undefined => {
+  const mounts: MountInfo[] = [];
+  // `-PT` gives POSIX single-line output plus the filesystem type; without -P a
+  // long device name wraps onto its own line and every column shifts by one.
+  for (const line of sh(['df', '-PT', '-x', 'tmpfs', '-x', 'devtmpfs']).split('\n').slice(1)) {
+    const p = line.trim().split(/\s+/);
+    if (p.length < 7) continue;
+    const [device, fstype, , used, avail, , mount] = p as string[];
+    if (!mount || !device) continue;
+    mounts.push({
+      mount,
+      device,
+      fstype,
+      usedKb: Number.parseInt(used ?? '0', 10) || 0,
+      availKb: Number.parseInt(avail ?? '0', 10) || 0,
+    });
+    if (mounts.length >= 40) break;
+  }
+
+  // Inodes come from a second call rather than being parsed out of the first:
+  // `df` cannot report blocks and inodes in one invocation.
+  for (const line of sh(['df', '-PiT', '-x', 'tmpfs', '-x', 'devtmpfs']).split('\n').slice(1)) {
+    const p = line.trim().split(/\s+/);
+    if (p.length < 7) continue;
+    const mount = p[6];
+    const pct = Number.parseInt((p[5] ?? '').replace('%', ''), 10);
+    const target = mounts.find((m) => m.mount === mount);
+    if (target && Number.isFinite(pct)) target.inodesUsedPct = pct;
+  }
+
+  const smart: SmartInfo[] = [];
+  if (has('smartctl')) {
+    for (const dev of sh(['lsblk', '-dno', 'PATH,TYPE'])
+      .split('\n')
+      .filter((l) => l.trim().endsWith('disk'))
+      .map((l) => (l.trim().split(/\s+/)[0] ?? '').trim())
+      .filter(Boolean)
+      .slice(0, 12)) {
+      const out = sh(['smartctl', '-H', dev], 8000);
+      if (!out) continue;
+      // "PASSED" (ATA) or "OK" (NVMe). Anything else, including an unreadable
+      // answer, is reported as unknown rather than quietly as healthy.
+      const healthy = /PASSED|result:\s*OK/i.test(out)
+        ? true
+        : /FAILED|FAILING/i.test(out)
+          ? false
+          : undefined;
+      smart.push({ device: dev, healthy });
+    }
+  }
+
+  if (mounts.length === 0 && smart.length === 0) return undefined;
+  return { mounts, smart };
+};
+
 const collectUpdates = (): PackageUpdates | undefined => {
   if (has('apt')) {
     const raw = bash('apt list --upgradable 2>/dev/null');
@@ -701,6 +782,7 @@ const collectHeavy = (): Partial<HostFacts> => {
     // has no business running on the fast metrics cadence.
     users: collectUsers(),
     updates: collectUpdates(),
+    storage: collectStorage(),
     kubernetes: collectKubernetes(),
     domains,
     tls: collectTls(),
