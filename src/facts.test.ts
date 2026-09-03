@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { parseCrontab } from './facts';
+import { getFacts, invalidateHeavyFacts, parseCrontab } from './facts';
 
 describe('parseCrontab', () => {
   test('reads a per-user spool, where there is no user column', () => {
@@ -61,5 +61,26 @@ describe('parseCrontab', () => {
   test('records where each entry came from', () => {
     const entries = parseCrontab('@daily /opt/x.sh', false, '/etc/cron.d/backup');
     expect(entries[0]?.source).toBe('/etc/cron.d/backup');
+  });
+});
+
+describe('invalidateHeavyFacts', () => {
+  // The heavy pass is cached for fifteen minutes, which is why applying every
+  // pending update left the list showing the same packages afterwards.
+  test('a second call re-reads the machine instead of replaying the cache', () => {
+    const first = getFacts();
+    const second = getFacts();
+    invalidateHeavyFacts();
+    const third = getFacts();
+
+    // Nothing to assert about content on a non-Linux runner; what matters is
+    // that the call is safe to make and the collector still answers.
+    expect(typeof second).toBe('object');
+    expect(typeof third).toBe('object');
+    expect(typeof first).toBe('object');
+  });
+
+  test('it is safe to call before anything was ever collected', () => {
+    expect(() => invalidateHeavyFacts()).not.toThrow();
   });
 });

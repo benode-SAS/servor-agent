@@ -827,3 +827,24 @@ export const getFacts = (): HostFacts => {
     cron: cron.length ? cron : undefined,
   };
 };
+
+/**
+ * Drop the cached heavy facts so the next collection reads the machine again.
+ *
+ * @remarks
+ * The heavy pass is cached for fifteen minutes because reading every home's
+ * authorized_keys, probing TLS and asking the package manager is not work to
+ * repeat on the metrics cadence. But an operator who just applied every pending
+ * update, toggled the firewall or enabled a service has changed exactly what
+ * that cache describes, and waiting a quarter of an hour to see it makes the
+ * screen look broken — the update list in particular still showed fourteen
+ * packages after installing all fourteen.
+ *
+ * So the control plane can say "what you remember is stale". It carries no
+ * data and cannot be used to make the agent do anything it does not already do
+ * on its own schedule.
+ */
+export const invalidateHeavyFacts = (): void => {
+  heavyCache = null;
+  heavyCacheAt = 0;
+};

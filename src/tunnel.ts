@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import type { AgentConfig } from './config';
+import { invalidateHeavyFacts } from './facts';
 import { type FsRequest, fsDescriptorFor, runFsOp } from './fs';
 import { chunkBytes, chunkDescriptorFor, type FsChunkRequest, runFsChunkOp } from './fs-upload';
 import { createGrantVerifier, type GrantVerifier } from './grant';
@@ -600,6 +601,14 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         // Authorization header on a local admin API is a credential.
         console.log(`net ${req.method} ${req.scheme}://${req.host}:${req.port}${req.path}`);
         void runNetRequest(req).then((result) => send({ type: 'net.result', id, ...result }));
+        return;
+      }
+      // Carries nothing and authorises nothing: it drops a cache so the next
+      // scheduled collection reads the machine instead of repeating a picture
+      // taken up to fifteen minutes ago. Sent after an action that changed what
+      // the picture describes — an upgrade, a firewall toggle, a service enable.
+      case 'facts.refresh': {
+        invalidateHeavyFacts();
         return;
       }
       case 'shell.input': {
