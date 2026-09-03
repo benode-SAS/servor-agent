@@ -268,6 +268,12 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
   // gone long before the kernel would.
   let heartbeat: ReturnType<typeof setTimeout> | null = null;
   let lastPong = 0;
+  // Round-trip of the last keepalive. Measured here rather than server-side
+  // because only this end knows when the ping actually left: the API sees the
+  // frame arrive, which already includes the network time it is trying to
+  // measure. Reported on the NEXT ping, so it costs no extra frame.
+  let lastPingSentAt = 0;
+  let lastRttMs: number | null = null;
   let connectedAt = 0;
   const PING_INTERVAL_MS = 25_000;
   const PONG_DEADLINE_MS = 60_000;
@@ -288,7 +294,8 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         ws?.close();
         return;
       }
-      send({ type: 'ping' });
+      lastPingSentAt = Date.now();
+      send(lastRttMs === null ? { type: 'ping' } : { type: 'ping', rttMs: lastRttMs });
       scheduleHeartbeat();
     }, PING_INTERVAL_MS);
   };
@@ -620,6 +627,7 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
       }
       if (msg.type === 'pong') {
         lastPong = Date.now();
+        if (lastPingSentAt > 0) lastRttMs = lastPong - lastPingSentAt;
         return;
       }
       if (msg.type === 'init.error') {
