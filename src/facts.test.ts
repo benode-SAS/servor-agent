@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { getFacts, invalidateHeavyFacts, parseCrontab } from './facts';
+import { heavyFactsAreStale, invalidateHeavyFacts, parseCrontab } from './facts';
 
 describe('parseCrontab', () => {
   test('reads a per-user spool, where there is no user column', () => {
@@ -64,23 +64,40 @@ describe('parseCrontab', () => {
   });
 });
 
-describe('invalidateHeavyFacts', () => {
-  // The heavy pass is cached for fifteen minutes, which is why applying every
-  // pending update left the list showing the same packages afterwards.
-  test('a second call re-reads the machine instead of replaying the cache', () => {
-    const first = getFacts();
-    const second = getFacts();
-    invalidateHeavyFacts();
-    const third = getFacts();
+describe('when the heavy pass runs again', () => {
+  const TTL = 15 * 60 * 1000;
+  const NOW = 1_800_000_000_000;
 
-    // Nothing to assert about content on a non-Linux runner; what matters is
-    // that the call is safe to make and the collector still answers.
-    expect(typeof second).toBe('object');
-    expect(typeof third).toBe('object');
-    expect(typeof first).toBe('object');
+  // The heavy pass shells out to docker, systemd, pm2 and a TLS probe. Driving
+  // it through `getFacts` — which the first version of this test did — costs
+  // tens of seconds on a real Linux box and does nothing at all elsewhere, so it
+  // was both slow and blind. The rule is checked directly instead.
+  test('a fresh cache is reused', () => {
+    expect(heavyFactsAreStale(NOW - 1_000, NOW)).toBe(false);
   });
 
-  test('it is safe to call before anything was ever collected', () => {
+  test('a cache older than the TTL is re-collected', () => {
+    expect(heavyFactsAreStale(NOW - TTL - 1, NOW)).toBe(true);
+  });
+
+  test('a cache exactly at the TTL is still good', () => {
+    expect(heavyFactsAreStale(NOW - TTL, NOW)).toBe(false);
+  });
+
+  // This is what makes "Update everything" show an empty list afterwards: the
+  // agent used to serve a quarter-hour-old inventory, so a machine that had just
+  // been fully updated still displayed its old queue of packages.
+  test('an invalidated cache is stale whatever the clock says', () => {
+    expect(heavyFactsAreStale(0, NOW)).toBe(true);
+    expect(heavyFactsAreStale(0, 0)).toBe(true);
+  });
+
+  test('invalidating is safe before anything was ever collected', () => {
+    expect(() => invalidateHeavyFacts()).not.toThrow();
+  });
+
+  test('invalidating twice is safe', () => {
+    invalidateHeavyFacts();
     expect(() => invalidateHeavyFacts()).not.toThrow();
   });
 });

@@ -798,10 +798,27 @@ const collectHeavy = (): Partial<HostFacts> => {
 
 // Merge live facts (every call) with the cached heavy facts (refreshed slowly).
 // Linux only for now; other platforms simply report no facts.
+/**
+ * Whether the heavy pass must run again.
+ *
+ * @remarks
+ * Named and exported so the rule can be checked without collecting anything: the
+ * heavy pass shells out to docker, systemd, pm2 and a TLS probe, so a test that
+ * exercised it through `getFacts` would take tens of seconds on a real Linux box
+ * and nothing at all anywhere else.
+ *
+ * `cachedAt === 0` is the invalidated state, and it is stale by definition —
+ * `now - 0` is astronomically larger than any TTL, but relying on that
+ * arithmetic to express "someone asked for a refresh" would be an accident
+ * rather than a decision.
+ */
+export const heavyFactsAreStale = (cachedAt: number, now: number): boolean =>
+  cachedAt === 0 || now - cachedAt > FACTS_TTL_MS;
+
 export const getFacts = (): HostFacts => {
   if (process.platform !== 'linux') return {};
   const now = Date.now();
-  if (!heavyCache || now - heavyCacheAt > FACTS_TTL_MS) {
+  if (!heavyCache || heavyFactsAreStale(heavyCacheAt, now)) {
     heavyCache = collectHeavy();
     heavyCacheAt = now;
   }
