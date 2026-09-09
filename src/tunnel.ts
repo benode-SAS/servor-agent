@@ -200,6 +200,16 @@ const writeStdin = (proc: ReturnType<typeof Bun.spawn>, data: string) => {
 export type TunnelDeps = {
   WebSocket: typeof WebSocket;
   spawn: typeof Bun.spawn;
+  /**
+   * Called when the control plane says the host facts it holds are out of date.
+   *
+   * @remarks
+   * Dropping the cache is only half the answer: without a push the corrected
+   * picture waits for the next scheduled round, up to five minutes on a retuned
+   * agent. The dashboard showed a container as running long after it was
+   * stopped, and the only cure was reloading the page.
+   */
+  onFactsRefresh: () => void;
 };
 
 /**
@@ -219,7 +229,11 @@ export type TunnelDeps = {
  * first.
  */
 export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) => {
-  const { WebSocket: WebSocketImpl = WebSocket, spawn = Bun.spawn } = deps;
+  const {
+    WebSocket: WebSocketImpl = WebSocket,
+    spawn = Bun.spawn,
+    onFactsRefresh = () => {},
+  } = deps;
   const wsUrl = `${cfg.apiUrl.replace(/^http/, 'ws')}/agent/tunnel/${cfg.serverId}`;
   const grants = createGrantVerifier({ serverId: cfg.serverId });
   grants.setKeys(execKeysB64);
@@ -604,11 +618,14 @@ export const startTunnel = (cfg: AgentConfig, deps: Partial<TunnelDeps> = {}) =>
         return;
       }
       // Carries nothing and authorises nothing: it drops a cache so the next
-      // scheduled collection reads the machine instead of repeating a picture
-      // taken up to fifteen minutes ago. Sent after an action that changed what
-      // the picture describes — an upgrade, a firewall toggle, a service enable.
+      // collection reads the machine instead of repeating a picture taken up to
+      // fifteen minutes ago, then asks for that collection to happen now rather
+      // than at the next scheduled round. Sent after an action that changed what
+      // the picture describes — a container stopped, an upgrade, a firewall
+      // toggle, a service enable.
       case 'facts.refresh': {
         invalidateHeavyFacts();
+        onFactsRefresh();
         return;
       }
       case 'shell.input': {

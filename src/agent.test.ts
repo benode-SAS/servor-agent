@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from 'bun:test';
 import { createHmac } from 'node:crypto';
 import { x25519 } from '@noble/curves/ed25519';
+import { AGENT_FACTS_PUSH_DELAY_MS } from '@servor/shared/constants';
 import { clampInterval, createAgent } from './agent';
 import type { CheckDef, CheckResult } from './checks';
 import type { AgentConfig } from './config';
@@ -83,6 +84,7 @@ const harness = (opts: HarnessOptions = {}) => {
   const exits: number[] = [];
   const tunnels: AgentConfig[] = [];
   let staged = 0;
+  let factsRefresh: (() => void) | undefined;
 
   const agent = createAgent(cfg, {
     fetch: async (url, init) => {
@@ -96,8 +98,9 @@ const harness = (opts: HarnessOptions = {}) => {
       staged++;
       return opts.stageUpdate ? await opts.stageUpdate() : false;
     },
-    startTunnel: (c) => {
+    startTunnel: (c, hooks) => {
       tunnels.push(c);
+      factsRefresh = hooks?.onFactsRefresh;
       return { isBusy: opts.busy ?? (() => false), reconnectNow: () => {} };
     },
     setExecPolicy: (keys) => policies.push(keys),
@@ -113,6 +116,9 @@ const harness = (opts: HarnessOptions = {}) => {
     saved,
     exits,
     tunnels,
+    /** What the control plane's `facts.refresh` reaches inside the agent. */
+    factsRefresh: () => factsRefresh?.(),
+    ingestCount: () => sent.filter((s) => s.url.endsWith(`/agent/ingest/${SERVER_ID}`)).length,
     stagedCount: () => staged,
     lastPolicy: () => policies[policies.length - 1] ?? [],
     bodyOf: (n: number) => String(sent[n]?.init?.body ?? ''),
@@ -621,5 +627,96 @@ describe('startup', () => {
     const settled = h.sent.length;
     await h.agent.runDueChecks();
     expect(h.sent).toHaveLength(settled);
+  });
+});
+
+// Stopping a container used to leave the dashboard showing it as running until
+// the next scheduled round — up to five minutes on a retuned agent. The control
+// plane already said the picture was stale; nothing made the agent redraw it.
+describe('pushing after an action changed the host', () => {
+  const settle = () => new Promise((r) => setTimeout(r, AGENT_FACTS_PUSH_DELAY_MS + 250));
+
+  test('a refresh request pushes a fresh sample without waiting for the interval', async () => {
+    const h = harness({ cfg: config({ mode: 'tunnel', intervalSeconds: 300 }) });
+    h.agent.start();
+    await flush();
+    const before = h.ingestCount();
+
+    h.factsRefresh();
+    await settle();
+
+    expect(h.ingestCount()).toBe(before + 1);
+    h.agent.stop();
+  });
+
+  test('a burst of actions produces one push, not one per action', async () => {
+    const h = harness({ cfg: config({ mode: 'tunnel', intervalSeconds: 300 }) });
+    h.agent.start();
+    await flush();
+    const before = h.ingestCount();
+
+    h.factsRefresh();
+    h.factsRefresh();
+    h.factsRefresh();
+    await settle();
+
+    expect(h.ingestCount()).toBe(before + 1);
+    h.agent.stop();
+  });
+
+  test('nothing is pushed before the settling delay', async () => {
+    const h = harness({ cfg: config({ mode: 'tunnel', intervalSeconds: 300 }) });
+    h.agent.start();
+    await flush();
+    const before = h.ingestCount();
+
+    h.factsRefresh();
+    await new Promise((r) => setTimeout(r, 200));
+
+    expect(h.ingestCount()).toBe(before);
+    h.agent.stop();
+  });
+
+  test('a later action pushes again once the first one has gone out', async () => {
+    const h = harness({ cfg: config({ mode: 'tunnel', intervalSeconds: 300 }) });
+    h.agent.start();
+    await flush();
+    const before = h.ingestCount();
+
+    h.factsRefresh();
+    await settle();
+    h.factsRefresh();
+    await settle();
+
+    expect(h.ingestCount()).toBe(before + 2);
+    h.agent.stop();
+  });
+
+  // The timer is registered like every other, so it dies with the agent rather
+  // than firing a push into a stopped process.
+  test('stopping the agent cancels a pending push', async () => {
+    const h = harness({ cfg: config({ mode: 'tunnel', intervalSeconds: 300 }) });
+    h.agent.start();
+    await flush();
+    const before = h.ingestCount();
+
+    h.factsRefresh();
+    h.agent.stop();
+    await settle();
+
+    expect(h.ingestCount()).toBe(before);
+  });
+
+  test('push mode has no channel to be told through, and pushes nothing extra', async () => {
+    const h = harness({ cfg: config({ intervalSeconds: 300 }) });
+    h.agent.start();
+    await flush();
+    const before = h.ingestCount();
+
+    h.factsRefresh();
+    await settle();
+
+    expect(h.ingestCount()).toBe(before);
+    h.agent.stop();
   });
 });

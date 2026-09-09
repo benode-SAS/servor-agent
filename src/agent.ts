@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto';
+import { AGENT_FACTS_PUSH_DELAY_MS } from '@servor/shared/constants';
 import {
   type CheckDef,
   type CheckResult,
@@ -60,7 +61,10 @@ export type AgentDeps = {
   collect: typeof defaultCollect;
   runCheck: typeof defaultRunCheck;
   stageUpdate: typeof defaultStageUpdate;
-  startTunnel: (cfg: AgentConfig) => { isBusy: () => boolean; reconnectNow: () => void };
+  startTunnel: (
+    cfg: AgentConfig,
+    hooks?: { onFactsRefresh?: () => void },
+  ) => { isBusy: () => boolean; reconnectNow: () => void };
   setExecPolicy: typeof defaultSetExecPolicy;
   saveConfig: typeof defaultSaveConfig;
   /** How the process ends; exiting is the whole of the restart mechanism. */
@@ -203,6 +207,26 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
   const metricsLoop = async () => {
     await pushMetrics();
     later(() => void metricsLoop(), cfg.intervalSeconds * 1000);
+  };
+
+  let factsPushPending = false;
+
+  /**
+   * Push one sample outside the loop, after an action changed the host.
+   *
+   * @remarks
+   * Debounced rather than queued: a burst of actions — stopping four containers
+   * in a row — describes one new state, and four pushes of it would only be
+   * three shells out too many. The delay lets the machine settle first, since
+   * `docker restart` returns before the container is back up.
+   */
+  const pushFactsSoon = () => {
+    if (factsPushPending) return;
+    factsPushPending = true;
+    later(() => {
+      factsPushPending = false;
+      void pushMetrics();
+    }, AGENT_FACTS_PUSH_DELAY_MS);
   };
 
   /** Check definitions currently in force, replaced wholesale on each config sync. */
@@ -441,7 +465,7 @@ export const createAgent = (cfg: AgentConfig, deps: Partial<AgentDeps> = {}): Ag
     void cronLoop();
 
     if (cfg.mode === 'tunnel') {
-      const tunnel = startTunnel(cfg);
+      const tunnel = startTunnel(cfg, { onFactsRefresh: pushFactsSoon });
       tunnelBusy = tunnel.isBusy;
       tunnelReconnect = tunnel.reconnectNow;
     }
